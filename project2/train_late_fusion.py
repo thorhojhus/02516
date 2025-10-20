@@ -17,7 +17,8 @@ torch.set_default_dtype(torch.bfloat16)
 # initing random weights, need to seed before
 from late_fusion_fc import late_fusion_model
 
-root_dir = '/home/thorh/02516/project2/dataset/ucf101_noleakage'
+root_dir = '/home/thorh/02516/project2/dataset/ucf101'
+#root_dir = '/home/thorh/02516/project2/dataset/ucf101_noleakage'
 
 transform_train = T.Compose([
     # T.RandomResizedCrop(224, scale=(0.7, 1.0)),
@@ -31,12 +32,12 @@ transform_test = T.Compose([
     T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
 ])
 
-train_framevideo_dataset = VideoFileDataset(root_dir=root_dir, split='train', transform=transform_train, stack_frames=True)
+train_framevideo_dataset = FrameVideoDataset(root_dir=root_dir, split='train', transform=transform_train, stack_frames=True)
 test_framevideo_dataset = FrameVideoDataset(root_dir=root_dir, split='test', transform=transform_test, stack_frames=True)
 val_framevideo_dataset = FrameVideoDataset(root_dir=root_dir, split='val', transform=transform_test, stack_frames=True)
-train_dataloader = DataLoader(train_framevideo_dataset, batch_size=16, shuffle=True, num_workers=8, pin_memory=True)
-test_dataloader = DataLoader(test_framevideo_dataset, batch_size=16, shuffle=False, num_workers=8, pin_memory=True)
-val_dataloader = DataLoader(val_framevideo_dataset, batch_size=16, shuffle=False, num_workers=8, pin_memory=True)
+train_dataloader = DataLoader(train_framevideo_dataset, batch_size=64, shuffle=True, num_workers=8, pin_memory=True)
+test_dataloader = DataLoader(test_framevideo_dataset, batch_size=1, shuffle=False, num_workers=8, pin_memory=True)
+val_dataloader = DataLoader(val_framevideo_dataset, batch_size=1, shuffle=False, num_workers=8, pin_memory=True)
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 model = late_fusion_model.to(device)

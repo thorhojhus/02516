@@ -18,7 +18,7 @@ torch.set_default_dtype(torch.bfloat16)
 from per_frame_model import model
 
 root_dir = '/home/thorh/02516/project2/dataset/ucf101' # leakage
-root_dir = '/home/thorh/02516/project2/dataset/ucf101_noleakage'
+#root_dir = '/home/thorh/02516/project2/dataset/ucf101_noleakage'
 
 transform_train = T.Compose([
     T.RandomResizedCrop(224, scale=(0.7, 1.0)),
