@@ -2,24 +2,7 @@ import torch
 import torch.nn as nn
 import torchvision.models as models
 
-model = models.resnet50(weights=models.ResNet50_Weights.DEFAULT)
-in_features = model.fc.in_features
-out_features = 10
-
-class fc(nn.Module):
-    def __init__(self, in_features, out_features):
-        super(fc, self).__init__()
-        self.dropout = nn.Dropout(p=0.5)
-        self.fc = nn.Linear(in_features, out_features)
-
-    def forward(self, x):
-        x = self.dropout(x)
-        x = self.fc(x)
-        return x
-    
-model.fc = fc(in_features, out_features)
-
-class LateFusionNetwork(nn.Module):
+class LateFusionMLP(nn.Module):
     def __init__(self, num_frames=10, num_classes=10, feature_dim=16):
         super().__init__()
         backbone = models.resnet50(weights=models.ResNet50_Weights.DEFAULT)
@@ -61,4 +44,4 @@ class LateFusionNetwork(nn.Module):
         out = self.mlp(features)
         return out
 
-late_fusion_model = LateFusionNetwork(num_frames=10, num_classes=10, feature_dim=2048)
+late_fusion_model = LateFusionMLP(num_frames=10, num_classes=10, feature_dim=2048)
