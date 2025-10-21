@@ -115,7 +115,12 @@ class DualStreamResNet(nn.Module):
         for param in self.temporal_stream.layer4.parameters():
             param.requires_grad = True
         
-        self.classifier = nn.Linear(intermediate_dim * 2, num_classes)
+        self.classifier = nn.Sequential(
+            nn.Dropout(0.9), # the secret trick
+            nn.Linear(intermediate_dim * 2, intermediate_dim),
+            nn.ReLU(),
+            nn.Dropout(0.9),
+            nn.Linear(intermediate_dim, num_classes))
 
     def forward(self, x_spatial, x_temporal):
         # x_spatial: [B, 3, H, W], x_temporal: [B, T, 2, H, W]
