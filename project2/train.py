@@ -58,6 +58,7 @@ def init_model(model_name):
 def eval_model(model, dataloader, dataset_length, per_frame=False):
     model.eval()
     correct = 0
+    correct_top2 = 0
     eval_loss = 0.0
     if per_frame:
         with torch.inference_mode():
@@ -71,6 +72,8 @@ def eval_model(model, dataloader, dataset_length, per_frame=False):
                 avg_output = outputs.mean(dim=0, keepdim=True)
                 predicted = avg_output.argmax(1)
                 correct += (label == predicted).sum().cpu().item()
+                _, top2_pred = avg_output.topk(2, dim=1)
+                correct_top2 += (top2_pred == label.unsqueeze(1)).any(dim=1).sum().cpu().item()
     else:
         with torch.inference_mode():
             for frames, label in dataloader:
@@ -80,7 +83,12 @@ def eval_model(model, dataloader, dataset_length, per_frame=False):
                 eval_loss += loss.item()
                 predicted = output.argmax(1)
                 correct += (label == predicted).sum().cpu().item()
-    return correct / dataset_length, eval_loss / len(dataloader)
+                _, top2_pred = output.topk(2, dim=1)
+                correct_top2 += (top2_pred == label.unsqueeze(1)).any(dim=1).sum().cpu().item()
+    acc1 = correct / dataset_length
+    acc2 = correct_top2 / dataset_length
+    avg_loss = eval_loss / len(dataloader)
+    return acc1, acc2, avg_loss
 
 def train(model, optimizer, NUM_EPOCHS, train_dataloader, val_dataloader, test_dataloader, per_frame=False):
     for epoch in range(NUM_EPOCHS):
@@ -101,11 +109,11 @@ def train(model, optimizer, NUM_EPOCHS, train_dataloader, val_dataloader, test_d
 
         epoch_loss = train_loss / len(train_dataloader)
         print(f'Epoch [{epoch+1}/{NUM_EPOCHS}]\nTrain Loss: {epoch_loss:.4f}, Train Acc: {train_correct/len(train_dataset):.4f}')
-        val_acc, val_loss = eval_model(model, val_dataloader, len(val_framevideo_dataset), per_frame=per_frame)
-        print(f'Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}')
+        val_acc, val_acc2, val_loss = eval_model(model, val_dataloader, len(val_framevideo_dataset), per_frame=per_frame)
+        print(f'Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}, Val Acc@2: {val_acc2:.4f}')
 
-    test_acc, test_loss = eval_model(model, test_dataloader, len(test_framevideo_dataset), per_frame=per_frame)
-    print(f'Test Loss: {test_loss:.4f}, Test Acc: {test_acc:.4f}')
+    test_acc, test_acc2, test_loss = eval_model(model, test_dataloader, len(test_framevideo_dataset), per_frame=per_frame)
+    print(f'Test Loss: {test_loss:.4f}, Test Acc: {test_acc:.4f}, Test Acc@2: {test_acc2:.4f}')
 
 if __name__ == '__main__':
     args = argparse.ArgumentParser(
