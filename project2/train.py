@@ -11,6 +11,7 @@ from torch.utils.data import DataLoader
 from project2.models.late_fusion import LateFusionMLP, LateFusionPool
 from project2.models.early_fusion import EarlyFusionCNN
 from project2.models.per_frame import PerFrameModel
+from project2.models.resnet_3d_18 import ResNet3D18
 from project2.utils import set_seed, set_default_dtype_based_on_arch
 
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -21,6 +22,7 @@ set_seed(42)
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 ROOT_DIR = '/dtu/datasets1/02516/ufc10'
+#ROOT_DIR = '/dtu/datasets1/02516/ucf101_noleakage'
 #ROOT_DIR = '/home/thorh/02516/project2/dataset/ucf101'
 #ROOT_DIR = '/home/thorh/02516/project2/dataset/ucf101_noleakage'
 
@@ -48,6 +50,8 @@ def init_model(model_name):
         return LateFusionPool(feature_dim=2048).to(device) # need to match resnet50 output dim
     elif model_name == 'per_frame':
         return PerFrameModel().to(device)
+    elif model_name == 'resnet_3d':
+        return ResNet3D18().to(device)
     else:
         raise ValueError(f"Unknown model name: {model_name}")
 
@@ -110,7 +114,7 @@ if __name__ == '__main__':
     )
     args.add_argument(
         '--model', type=str, default='early_fusion',
-        choices=['early_fusion', 'late_fusion_mlp', 'late_fusion_pool', 'per_frame'],
+        choices=['early_fusion', 'late_fusion_mlp', 'late_fusion_pool', 'per_frame', 'resnet_3d'],
         help='Model architecture to use'
     )
     args.add_argument(
@@ -148,8 +152,7 @@ if __name__ == '__main__':
     ROOT_DIR = args.root_dir
 
     model = init_model(args.model)
-    if args.model == 'per_frame':
-        per_frame = True
+    per_frame = (args.model == 'per_frame')
 
     if args.compile:
         model = torch.compile(model)
