@@ -52,6 +52,9 @@ def init_model(model_name):
         return PerFrameModel().to(device)
     elif model_name == 'resnet_3d':
         return ResNet3D18().to(device)
+    elif model_name == 'cnn2d_frame':
+        from project2.models.cnn_2d_frame import Network
+        return Network().to(device)
     else:
         raise ValueError(f"Unknown model name: {model_name}")
 
@@ -122,7 +125,7 @@ if __name__ == '__main__':
     )
     args.add_argument(
         '--model', type=str, default='early_fusion',
-        choices=['early_fusion', 'late_fusion_mlp', 'late_fusion_pool', 'per_frame', 'resnet_3d'],
+        choices=['early_fusion', 'late_fusion_mlp', 'late_fusion_pool', 'per_frame', 'resnet_3d', 'cnn2d_frame'],
         help='Model architecture to use'
     )
     args.add_argument(
@@ -160,7 +163,7 @@ if __name__ == '__main__':
     ROOT_DIR = args.root_dir
 
     model = init_model(args.model)
-    per_frame = (args.model == 'per_frame')
+    per_frame = ("frame" in args.model)
 
     if args.compile:
         model = torch.compile(model)
