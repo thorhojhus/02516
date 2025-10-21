@@ -15,13 +15,13 @@ from project2.models.resnet_3d_18 import ResNet3D18
 from project2.utils import set_seed, set_default_dtype_based_on_arch
 
 warnings.filterwarnings("ignore", category=UserWarning)
-# allow gpus to go fast
+# allow ampere gpus to go fast
 torch.set_float32_matmul_precision('high')
-set_default_dtype_based_on_arch()
+#set_default_dtype_based_on_arch()
 set_seed(42)
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-ROOT_DIR = '/dtu/datasets1/02516/ufc10'
+#ROOT_DIR = '/dtu/datasets1/02516/ufc10'
 #ROOT_DIR = '/dtu/datasets1/02516/ucf101_noleakage'
 #ROOT_DIR = '/home/thorh/02516/project2/dataset/ucf101'
 #ROOT_DIR = '/home/thorh/02516/project2/dataset/ucf101_noleakage'
@@ -55,10 +55,13 @@ def init_model(model_name):
     elif model_name == 'cnn2d_frame':
         from project2.models.cnn_2d_frame import Network
         return Network().to(device)
+    elif model_name == 'dualstream':
+        from project2.models.dual_stream_network import DualStreamResNet
+        return DualStreamResNet().to(device)
     else:
         raise ValueError(f"Unknown model name: {model_name}")
 
-def eval_model(model, dataloader, dataset_length, per_frame=False):
+def eval_model(model, dataloader, dataset_length, per_frame=False, dualstream=False):
     model.eval()
     correct = 0
     correct_top2 = 0
@@ -77,6 +80,18 @@ def eval_model(model, dataloader, dataset_length, per_frame=False):
                 correct += (label == predicted).sum().cpu().item()
                 _, top2_pred = avg_output.topk(2, dim=1)
                 correct_top2 += (top2_pred == label.unsqueeze(1)).any(dim=1).sum().cpu().item()
+
+    elif dualstream:
+        with torch.inference_mode():
+            for frames, flows, label in dataloader:
+                frames, flows, label = frames.to(device), flows.to(device), label.to(device)
+                output = model(frames, flows)
+                loss = F.cross_entropy(output, label)
+                eval_loss += loss.item()
+                predicted = output.argmax(1)
+                correct += (label == predicted).sum().cpu().item()
+                _, top2_pred = output.topk(2, dim=1)
+                correct_top2 += (top2_pred == label.unsqueeze(1)).any(dim=1).sum().cpu().item()
     else:
         with torch.inference_mode():
             for frames, label in dataloader:
@@ -93,29 +108,42 @@ def eval_model(model, dataloader, dataset_length, per_frame=False):
     avg_loss = eval_loss / len(dataloader)
     return acc1, acc2, avg_loss
 
-def train(model, optimizer, NUM_EPOCHS, train_dataloader, val_dataloader, test_dataloader, per_frame=False):
+def train(model, optimizer, NUM_EPOCHS, train_dataloader, val_dataloader, test_dataloader, per_frame=False, dualstream=False):
     for epoch in range(NUM_EPOCHS):
         model.train()
         train_loss = 0.0
         train_correct = 0
-        for i, (inputs, labels) in enumerate(train_dataloader):
-            optimizer.zero_grad()
-            inputs, labels = inputs.to(device), labels.to(device)
-            output = model(inputs)
-            loss = F.cross_entropy(output, labels, label_smoothing=0.2)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-            train_loss += loss.item()
-            predicted = output.argmax(1)
-            train_correct += (labels==predicted).sum().cpu().item()
+        if dualstream:
+            for i, (inputs, flows, labels) in enumerate(train_dataloader):
+                optimizer.zero_grad()
+                inputs, flows, labels = inputs.to(device), flows.to(device), labels.to(device)
+                output = model(inputs, flows)
+                loss = F.cross_entropy(output, labels, label_smoothing=0.2)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+                train_loss += loss.item()
+                predicted = output.argmax(1)
+                train_correct += (labels==predicted).sum().cpu().item()
+        else:
+            for i, (inputs, labels) in enumerate(train_dataloader):
+                optimizer.zero_grad()
+                inputs, labels = inputs.to(device), labels.to(device)
+                output = model(inputs)
+                loss = F.cross_entropy(output, labels, label_smoothing=0.2)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+                train_loss += loss.item()
+                predicted = output.argmax(1)
+                train_correct += (labels==predicted).sum().cpu().item()
 
         epoch_loss = train_loss / len(train_dataloader)
         print(f'Epoch [{epoch+1}/{NUM_EPOCHS}]\nTrain Loss: {epoch_loss:.4f}, Train Acc: {train_correct/len(train_dataset):.4f}')
-        val_acc, val_acc2, val_loss = eval_model(model, val_dataloader, len(val_framevideo_dataset), per_frame=per_frame)
+        val_acc, val_acc2, val_loss = eval_model(model, val_dataloader, len(val_framevideo_dataset), per_frame=per_frame, dualstream=dualstream)
         print(f'Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}, Val Acc@2: {val_acc2:.4f}')
 
-    test_acc, test_acc2, test_loss = eval_model(model, test_dataloader, len(test_framevideo_dataset), per_frame=per_frame)
+    test_acc, test_acc2, test_loss = eval_model(model, test_dataloader, len(test_framevideo_dataset), per_frame=per_frame, dualstream=dualstream)
     print(f'Test Loss: {test_loss:.4f}, Test Acc: {test_acc:.4f}, Test Acc@2: {test_acc2:.4f}')
 
 if __name__ == '__main__':
@@ -125,7 +153,7 @@ if __name__ == '__main__':
     )
     args.add_argument(
         '--model', type=str, default='early_fusion',
-        choices=['early_fusion', 'late_fusion_mlp', 'late_fusion_pool', 'per_frame', 'resnet_3d', 'cnn2d_frame'],
+        choices=['early_fusion', 'late_fusion_mlp', 'late_fusion_pool', 'per_frame', 'resnet_3d', 'cnn2d_frame', 'dualstream'],
         help='Model architecture to use'
     )
     args.add_argument(
@@ -145,7 +173,7 @@ if __name__ == '__main__':
         help='Weight decay for the optimizer'
     )
     args.add_argument(
-        '--root_dir', type=str, default='/dtu/datasets1/02516/ufc10',
+        '--root_dir', type=str, default='/dtu/datasets1/02516/ucf101_noleakage',
         help='Root directory of the dataset'
     )
     args.add_argument(
@@ -164,6 +192,7 @@ if __name__ == '__main__':
 
     model = init_model(args.model)
     per_frame = ("frame" in args.model)
+    dualstream = (args.model == "dualstream")
 
     if args.compile:
         model = torch.compile(model)
@@ -174,11 +203,20 @@ if __name__ == '__main__':
 
     if per_frame:
         train_dataset = FrameImageDataset(root_dir=ROOT_DIR, split='train', transform=transform_train)
+    elif dualstream:
+        from project2.datasets import FrameFlowImageDataset
+        train_dataset = FrameFlowImageDataset(root_dir=ROOT_DIR, split='train')
     else:
         train_dataset = FrameVideoDataset(root_dir=ROOT_DIR, split='train', transform=transform_train, stack_frames=True)
     
-    test_framevideo_dataset = FrameVideoDataset(root_dir=ROOT_DIR, split='test', transform=transform_test, stack_frames=True)
-    val_framevideo_dataset = FrameVideoDataset(root_dir=ROOT_DIR, split='val', transform=transform_test, stack_frames=True)
+    if dualstream:
+        from project2.datasets import FrameFlowImageDataset
+        test_framevideo_dataset = FrameFlowImageDataset(root_dir=ROOT_DIR, split='test')
+        val_framevideo_dataset = FrameFlowImageDataset(root_dir=ROOT_DIR, split='val')
+    else:
+        test_framevideo_dataset = FrameVideoDataset(root_dir=ROOT_DIR, split='test', transform=transform_test, stack_frames=True)
+        val_framevideo_dataset = FrameVideoDataset(root_dir=ROOT_DIR, split='val', transform=transform_test, stack_frames=True)
+    
     train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=8, pin_memory=True)
     
     if per_frame:
@@ -189,4 +227,4 @@ if __name__ == '__main__':
         val_dataloader = DataLoader(val_framevideo_dataset, batch_size=args.batch_size, shuffle=False, num_workers=8, pin_memory=True)
 
 
-    train(model, optimizer, NUM_EPOCHS, train_dataloader, val_dataloader, test_dataloader, per_frame=per_frame)
+    train(model, optimizer, NUM_EPOCHS, train_dataloader, val_dataloader, test_dataloader, per_frame=per_frame, dualstream=dualstream)
