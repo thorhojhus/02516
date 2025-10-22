@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 import random
+from project2.plotting import *
 
 def set_seed(seed: int):
     torch.manual_seed(42)

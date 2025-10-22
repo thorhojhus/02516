@@ -13,6 +13,7 @@ from project2.models.early_fusion import EarlyFusionCNN
 from project2.models.per_frame import PerFrameModel
 from project2.models.resnet_3d_18 import ResNet3D18
 from project2.utils import set_seed, set_default_dtype_based_on_arch
+from project2.plotting import plot_all_metrics
 
 warnings.filterwarnings("ignore", category=UserWarning)
 # allow ampere gpus to go fast
@@ -108,7 +109,15 @@ def eval_model(model, dataloader, dataset_length, per_frame=False, dualstream=Fa
     avg_loss = eval_loss / len(dataloader)
     return acc1, acc2, avg_loss
 
-def train(model, optimizer, NUM_EPOCHS, train_dataloader, val_dataloader, test_dataloader, per_frame=False, dualstream=False):
+def train(model, optimizer, NUM_EPOCHS, train_dataloader, val_dataloader, test_dataloader, per_frame=False, dualstream=False, save_plots=False):
+    # initialize history for plots
+    history = {
+        'train_losses': [],
+        'train_accs': [],
+        'val_losses': [],
+        'val_accs': [],
+    }
+    
     for epoch in range(NUM_EPOCHS):
         model.train()
         train_loss = 0.0
@@ -139,12 +148,30 @@ def train(model, optimizer, NUM_EPOCHS, train_dataloader, val_dataloader, test_d
                 train_correct += (labels==predicted).sum().cpu().item()
 
         epoch_loss = train_loss / len(train_dataloader)
-        print(f'Epoch [{epoch+1}/{NUM_EPOCHS}]\nTrain Loss: {epoch_loss:.4f}, Train Acc: {train_correct/len(train_dataset):.4f}')
+        epoch_acc = train_correct / len(train_dataset)
+        
+        # store training metrics for plot
+        history['train_losses'].append(epoch_loss)
+        history['train_accs'].append(epoch_acc)
+        
+        print(f'Epoch [{epoch+1}/{NUM_EPOCHS}]\nTrain Loss: {epoch_loss:.4f}, Train Acc: {epoch_acc:.4f}')
         val_acc, val_acc2, val_loss = eval_model(model, val_dataloader, len(val_framevideo_dataset), per_frame=per_frame, dualstream=dualstream)
-        print(f'Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}, Val Acc@2: {val_acc2:.4f}')
+        
+        # store validation metrics for plot
+        history['val_losses'].append(val_loss)
+        history['val_accs'].append(val_acc)
+        
+        print(f'Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}')
 
     test_acc, test_acc2, test_loss = eval_model(model, test_dataloader, len(test_framevideo_dataset), per_frame=per_frame, dualstream=dualstream)
-    print(f'Test Loss: {test_loss:.4f}, Test Acc: {test_acc:.4f}, Test Acc@2: {test_acc2:.4f}')
+    print(f'Test Loss: {test_loss:.4f}, Test Acc: {test_acc:.4f}')
+    
+    # store test metrics
+    history['test_acc'] = test_acc
+    history['test_loss'] = test_loss
+    
+    if save_plots:
+        plot_all_metrics(history, save_dir='project2/plots')
 
 if __name__ == '__main__':
     args = argparse.ArgumentParser(
@@ -184,6 +211,11 @@ if __name__ == '__main__':
     args.add_argument(
         '--train_augmentation', action='store_true',
         help='Whether to use data augmentation during training'
+    )
+
+    args.add_argument(
+        '--plots', action='store_true',
+        help='Whether to plot images'
     )
 
     args = args.parse_args()
@@ -227,4 +259,4 @@ if __name__ == '__main__':
         val_dataloader = DataLoader(val_framevideo_dataset, batch_size=args.batch_size, shuffle=False, num_workers=8, pin_memory=True)
 
 
-    train(model, optimizer, NUM_EPOCHS, train_dataloader, val_dataloader, test_dataloader, per_frame=per_frame, dualstream=dualstream)
+    train(model, optimizer, NUM_EPOCHS, train_dataloader, val_dataloader, test_dataloader, per_frame=per_frame, dualstream=dualstream, save_plots=args.plots)
