@@ -4,28 +4,36 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 import random
+import copy
 from tqdm import tqdm
 from project2.datasets import FrameVideoDataset, VideoFileDataset, FrameImageDataset
 import torchvision.transforms as T
 from torch.utils.data import DataLoader
+from project2.utils import set_seed, set_default_dtype_based_on_arch
+set_seed(42)
+
 from project2.models.late_fusion import LateFusionMLP, LateFusionPool
 from project2.models.early_fusion import EarlyFusionCNN
 from project2.models.per_frame import PerFrameModel
 from project2.models.resnet_3d_18 import ResNet3D18
-from project2.utils import set_seed, set_default_dtype_based_on_arch
 from project2.plotting import plot_all_metrics
 
 warnings.filterwarnings("ignore", category=UserWarning)
 # allow ampere gpus to go fast
 torch.set_float32_matmul_precision('high')
 #set_default_dtype_based_on_arch()
-set_seed(42)
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 #ROOT_DIR = '/dtu/datasets1/02516/ufc10'
 #ROOT_DIR = '/dtu/datasets1/02516/ucf101_noleakage'
 #ROOT_DIR = '/home/thorh/02516/project2/dataset/ucf101'
 #ROOT_DIR = '/home/thorh/02516/project2/dataset/ucf101_noleakage'
+
+def worker_init_fn(worker_id):
+    """Seed each dataloader worker to ensure reproducibility"""
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
 
 def init_transforms(do_train_augmentation=False):
     if do_train_augmentation:
@@ -46,7 +54,7 @@ def init_model(model_name):
     if model_name == 'early_fusion':
         return EarlyFusionCNN().to(device)
     elif model_name == 'late_fusion_mlp':
-        return LateFusionMLP(hidden_dim=256).to(device)
+        return LateFusionMLP().to(device)
     elif model_name == 'late_fusion_pool':
         return LateFusionPool(feature_dim=2048).to(device) # need to match resnet50 output dim
     elif model_name == 'per_frame':
@@ -117,7 +125,12 @@ def train(model, optimizer, NUM_EPOCHS, train_dataloader, val_dataloader, test_d
         'val_losses': [],
         'val_accs': [],
     }
-    
+
+    # track best model based on validation loss
+    best_val_loss = float('inf')
+    best_model = None
+    best_epoch = 0
+
     for epoch in range(NUM_EPOCHS):
         model.train()
         train_loss = 0.0
@@ -149,29 +162,45 @@ def train(model, optimizer, NUM_EPOCHS, train_dataloader, val_dataloader, test_d
 
         epoch_loss = train_loss / len(train_dataloader)
         epoch_acc = train_correct / len(train_dataset)
-        
+
         # store training metrics for plot
         history['train_losses'].append(epoch_loss)
         history['train_accs'].append(epoch_acc)
-        
+
         print(f'Epoch [{epoch+1}/{NUM_EPOCHS}]\nTrain Loss: {epoch_loss:.4f}, Train Acc: {epoch_acc:.4f}')
         val_acc, val_acc2, val_loss = eval_model(model, val_dataloader, len(val_framevideo_dataset), per_frame=per_frame, dualstream=dualstream)
-        
+
         # store validation metrics for plot
         history['val_losses'].append(val_loss)
         history['val_accs'].append(val_acc)
-        
+
         print(f'Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}')
 
-    test_acc, test_acc2, test_loss = eval_model(model, test_dataloader, len(test_framevideo_dataset), per_frame=per_frame, dualstream=dualstream)
-    print(f'Test Loss: {test_loss:.4f}, Test Acc: {test_acc:.4f}')
-    
+        # save best model based on validation loss
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_epoch = epoch + 1
+            # clone model and move to CPU
+            best_model = copy.deepcopy(model).cpu()
+            print(f'New best model found at epoch {best_epoch} with val loss: {best_val_loss:.4f}')
+
+    # test the best model
+    print(f'\nTesting best model from epoch {best_epoch} (val loss: {best_val_loss:.4f})')
+    best_model = best_model.to(device)
+    test_acc, test_acc2, test_loss = eval_model(best_model, test_dataloader, len(test_framevideo_dataset), per_frame=per_frame, dualstream=dualstream)
+    print(f'Test Loss: {test_loss:.4f}, Test Acc: {test_acc:.4f}, Test Acc Top-2: {test_acc2:.4f}')
+
     # store test metrics
     history['test_acc'] = test_acc
     history['test_loss'] = test_loss
-    
+    history['best_epoch'] = best_epoch
+
     if save_plots:
         plot_all_metrics(history, save_dir='project2/plots', plot_name=f'{model.__class__.__name__}_training_results')
+
+    # Clean up best model to free memory
+    del best_model
+    torch.cuda.empty_cache()
 
 if __name__ == '__main__':
     args = argparse.ArgumentParser(
@@ -249,14 +278,17 @@ if __name__ == '__main__':
         test_framevideo_dataset = FrameVideoDataset(root_dir=ROOT_DIR, split='test', transform=transform_test, stack_frames=True)
         val_framevideo_dataset = FrameVideoDataset(root_dir=ROOT_DIR, split='val', transform=transform_test, stack_frames=True)
     
-    train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=8, pin_memory=True)
-    
+    train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=8, pin_memory=True, worker_init_fn=worker_init_fn)
+
     if per_frame:
-        test_dataloader = DataLoader(test_framevideo_dataset, batch_size=1, shuffle=False, num_workers=8, pin_memory=True)
-        val_dataloader = DataLoader(val_framevideo_dataset, batch_size=1, shuffle=False, num_workers=8, pin_memory=True)
+        test_dataloader = DataLoader(test_framevideo_dataset, batch_size=1, shuffle=False, num_workers=8, pin_memory=True, worker_init_fn=worker_init_fn)
+        val_dataloader = DataLoader(val_framevideo_dataset, batch_size=1, shuffle=False, num_workers=8, pin_memory=True, worker_init_fn=worker_init_fn)
     else:
-        test_dataloader = DataLoader(test_framevideo_dataset, batch_size=args.batch_size, shuffle=False, num_workers=8, pin_memory=True)
-        val_dataloader = DataLoader(val_framevideo_dataset, batch_size=args.batch_size, shuffle=False, num_workers=8, pin_memory=True)
+        test_dataloader = DataLoader(test_framevideo_dataset, batch_size=args.batch_size, shuffle=False, num_workers=8, pin_memory=True, worker_init_fn=worker_init_fn)
+        val_dataloader = DataLoader(val_framevideo_dataset, batch_size=args.batch_size, shuffle=False, num_workers=8, pin_memory=True, worker_init_fn=worker_init_fn)
 
 
     train(model, optimizer, NUM_EPOCHS, train_dataloader, val_dataloader, test_dataloader, per_frame=per_frame, dualstream=dualstream, save_plots=args.plots)
+
+    # Explicitly clean up dataloaders to terminate worker processes
+    del train_dataloader, val_dataloader, test_dataloader
