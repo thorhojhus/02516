@@ -48,3 +48,67 @@ def plot_all_metrics(history, save_dir='project2/plots', plot_name: str = 'train
 
     # also save history as a numpy file
     np.savez(f'{save_dir}/{plot_name}_history.npz', **history)
+
+
+if __name__ == '__main__':
+    import glob
+    # find all npz files in the plots directory
+    npz_files = glob.glob('project2/plots/*.npz')
+
+    history_dicts = []
+
+    if not npz_files:
+        print("No history files found in project2/plots")
+    else:
+        # collect all history files and plot them
+        for npz_file in npz_files:
+            model_name_with_path, _, _ = npz_file.partition("_")
+            model_name = model_name_with_path.split('/')[-1]
+            history_data = np.load(npz_file)
+            history_dict = {key: history_data[key] for key in history_data.files}
+            history_dicts.append((model_name, history_dict))
+    
+    # Do a shared plot showing only accuracies for all the models in the history_dicts:
+    if history_dicts:
+        plt.figure(figsize=(10, 6))
+        epochs = range(1, len(history_dicts[0][1]['train_accs']) + 1)
+
+        for idx, (model_name, history) in enumerate(history_dicts):
+            plt.plot(epochs, history['train_accs'], label=f'{model_name}', linestyle='-')
+            # plt.plot(epochs, history['val_accs'], label=f'{model_name} Val', linestyle='--')
+            # plt.axhline(y=history['test_acc'], linestyle=':', label=f'{model_name} Test')
+        
+        plt.xlabel('Epoch', fontsize=12)
+        plt.ylabel('Accuracy', fontsize=12)
+        plt.title('Model Accuracies', fontsize=14, fontweight='bold')
+        plt.legend(fontsize=10)
+        plt.grid(True, alpha=0.3)
+        plt.ylim([0, 1])
+        plt.tight_layout()
+        shared_plot_path = 'project2/plots/all_models_accuracies.png'
+        plt.savefig(shared_plot_path, dpi=300, bbox_inches='tight')
+        print(f"Saved all models accuracies plot to {shared_plot_path}")
+        plt.close()
+    
+    if history_dicts:
+        plt.figure(figsize=(10, 6))
+        epochs = range(1, len(history_dicts[0][1]['train_accs']) + 1)
+
+        for idx, (model_name, history) in enumerate(history_dicts):
+            # plt.plot(epochs, history['train_accs'], label=f'{model_name}', linestyle='-')
+            plt.plot(epochs, history['val_accs'], label=f'{model_name} Val', linestyle='-')
+            # plt.axhline(y=history['test_acc'], linestyle=':', label=f'{model_name} Test')
+        
+        plt.xlabel('Epoch', fontsize=12)
+        plt.ylabel('Accuracy', fontsize=12)
+        plt.title('Model Accuracies (Validation)', fontsize=14, fontweight='bold')
+        plt.legend(fontsize=10)
+        plt.grid(True, alpha=0.3)
+        plt.ylim([0, 1])
+        plt.xlim([1, 10])
+        plt.xticks(epochs)
+        plt.tight_layout()
+        shared_plot_path = 'project2/plots/all_models_accuracies_val.png'
+        plt.savefig(shared_plot_path, dpi=300, bbox_inches='tight')
+        print(f"Saved all models accuracies plot to {shared_plot_path}")
+        plt.close()
