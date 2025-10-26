@@ -12,7 +12,7 @@ def plot_images(images, labels):
     plt.show()
 
 
-def plot_all_metrics(history, save_dir='project2/plots'):
+def plot_all_metrics(history, save_dir='project2/plots', plot_name: str = 'training_results'):
     """Plot training, validation, and test metrics in a single figure."""
     os.makedirs(save_dir, exist_ok=True)
     
@@ -41,7 +41,10 @@ def plot_all_metrics(history, save_dir='project2/plots'):
     ax2.set_ylim([0, 1])
     
     plt.tight_layout()
-    save_path = f'{save_dir}/training_results.png'
+    save_path = f'{save_dir}/{plot_name}.png'
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
     print(f"Saved training results to {save_path}")
     plt.close()
+
+    # also save history as a numpy file
+    np.savez(f'{save_dir}/{plot_name}_history.npz', **history)

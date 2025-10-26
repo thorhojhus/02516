@@ -171,7 +171,7 @@ def train(model, optimizer, NUM_EPOCHS, train_dataloader, val_dataloader, test_d
     history['test_loss'] = test_loss
     
     if save_plots:
-        plot_all_metrics(history, save_dir='project2/plots')
+        plot_all_metrics(history, save_dir='project2/plots', plot_name=f'{model.__class__.__name__}_training_results')
 
 if __name__ == '__main__':
     args = argparse.ArgumentParser(
