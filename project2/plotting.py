@@ -1,6 +1,9 @@
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend for WSL/headless environments
 import matplotlib.pyplot as plt
 import numpy as np
 import os
+import json
 
 def plot_images(images, labels):
     plt.figure(figsize=(10, 10))
@@ -48,6 +51,9 @@ def plot_all_metrics(history, save_dir='project2/plots', plot_name: str = 'train
 
     # also save history as a numpy file
     np.savez(f'{save_dir}/{plot_name}_history.npz', **history)
+
+    with open(f'{save_dir}/{plot_name}_history.json', 'w') as f:
+        json.dump(history, f)
 
 
 if __name__ == '__main__':
