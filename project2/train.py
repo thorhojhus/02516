@@ -192,6 +192,7 @@ def train(model, optimizer, NUM_EPOCHS, train_dataloader, val_dataloader, test_d
 
     # store test metrics
     history['test_acc'] = test_acc
+    history['test_acc_top2'] = test_acc2
     history['test_loss'] = test_loss
     history['best_epoch'] = best_epoch
 

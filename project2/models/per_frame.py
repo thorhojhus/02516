@@ -9,9 +9,9 @@ class PerFrameModel(nn.Module):
         for param in model.parameters():
             param.requires_grad = False
         in_features = model.fc.in_features
-        out_features = 10 
+        out_features = 10
         model.fc = nn.Sequential(
-            nn.Dropout(p=0.5),
+            nn.Dropout(p=0.7),
             nn.Linear(in_features, out_features)
         )
         self.model = model

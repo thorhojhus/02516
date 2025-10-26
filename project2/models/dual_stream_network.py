@@ -1,4 +1,4 @@
-import torch, torch.nn as nn, torch.nn.functional as F, torchvision.models as models
+import torch, torch.nn as nn, torchvision.models as models
 
 class ConvNet(nn.Module):
     """Similar to the ConvNet used in DualStream paper"""
@@ -96,7 +96,7 @@ class DualStreamResNet(nn.Module):
         self.spatial_stream = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
         intermediate_dim = self.spatial_stream.fc.in_features
         self.spatial_stream.fc = nn.Identity()
-        
+
         self.temporal_stream = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
         self.temporal_stream.fc = nn.Identity()
         self.temporal_stream = mod_resnet_inputs(self.temporal_stream, in_channels=2 * num_flow_frames)

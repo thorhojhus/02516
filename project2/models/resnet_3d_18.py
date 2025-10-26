@@ -8,7 +8,7 @@ class ResNet3D18(nn.Module):
         for param in self.model.parameters():
             param.requires_grad = False
         self.model.fc = nn.Sequential(
-            nn.Dropout(p=0.5),
+            nn.Dropout(p=0.7),
             nn.Linear(self.model.fc.in_features, num_classes)
         )
 

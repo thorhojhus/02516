@@ -14,7 +14,7 @@ class LateFusionMLP(nn.Module):
         self.mlp = nn.Sequential(
             nn.Linear(num_frames * feature_dim, hidden_dim),
             nn.ReLU(),
-            nn.Dropout(0.5),
+            nn.Dropout(0.7),
             nn.Linear(hidden_dim, num_classes)
         )
 
@@ -46,7 +46,7 @@ class LateFusionMLP(nn.Module):
 
 
 class LateFusionPool(nn.Module):
-    def __init__(self, num_classes=10, feature_dim=256):
+    def __init__(self, num_classes=10, feature_dim=2048):
         super().__init__()
         backbone = models.resnet50(weights=models.ResNet50_Weights.DEFAULT)
         self.feature_extractor = nn.Sequential(*list(backbone.children())[:-1])
