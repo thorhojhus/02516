@@ -17,4 +17,4 @@ dependencies = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["project2*"]
+include = ["project2*", "project3*"]
