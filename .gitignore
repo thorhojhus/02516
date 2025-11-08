@@ -14,7 +14,11 @@ dataset/
 data/
 *.gz
 *.zip
-*.tar
+*.
+
+*.pth
+*.tex
+*ipynb
 
 .DS_Store
 .vscode/

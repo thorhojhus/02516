@@ -47,7 +47,7 @@ class PH2Dataset(torch.utils.data.Dataset):
         root_dir='/dtu/datasets1/02516/PH2_Dataset_images',
         split='train',
         transform=None,
-        image_size=(256, 256),
+        image_size=(512, 512),
     ):
         assert split in ['train', 'val', 'test']
         global _PH2_SPLITS
@@ -100,9 +100,11 @@ class DRIVEDataset(torch.utils.data.Dataset):
         root_dir='/dtu/datasets1/02516/DRIVE',
         split='train',
         transform=None,
-        image_size=(256, 256),
+        image_size=(512, 512),
+        augment=False,
     ):
         assert split in ['train', 'val', 'test']
+        self.augment = augment
         global _DRIVE_SPLITS
         training_dir = os.path.join(root_dir, 'training')
         image_paths = sorted(glob(os.path.join(training_dir, 'images', '*_training.tif')))
@@ -116,12 +118,19 @@ class DRIVEDataset(torch.utils.data.Dataset):
         self.transform = transform
         self.image_size = image_size
         self.samples = _DRIVE_SPLITS[split]
+        
+        # For training with augmentation, double the dataset by including flipped versions
+        if self.augment:
+            self.samples = [(sample_id, False) for sample_id in self.samples] + \
+                          [(sample_id, True) for sample_id in self.samples]
+        else:
+            self.samples = [(sample_id, False) for sample_id in self.samples]
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        sample_id = self.samples[idx]
+        sample_id, should_flip = self.samples[idx]
         subset = 'training'
         image_name = f'{sample_id}_training.tif'
         mask_name = f'{sample_id}_manual1.gif'
@@ -139,6 +148,11 @@ class DRIVEDataset(torch.utils.data.Dataset):
             image, mask = self.transform(image, mask)
         else:
             image, mask = _default_transform(image, mask)
+        
+        # Apply deterministic horizontal flip for augmented samples
+        if should_flip:
+            image = F.hflip(image)
+            mask = F.hflip(mask)
 
         return image, mask, sample_id
 

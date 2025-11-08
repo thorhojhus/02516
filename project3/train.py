@@ -106,7 +106,6 @@ def train_one_epoch(model, dataloader, optimizer, loss_fn, threshold):
         logits = model(images)
         loss = loss_fn(logits, masks)
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
 
         total_loss += loss.item()
@@ -164,9 +163,9 @@ def init_datasets(dataset_name, img_size, batch_size):
         test_dataset = PH2Dataset(split='test', transform=transform, image_size=None)
     elif dataset_name == 'drive':
         transform = init_segmentation_transform(img_size)
-        train_dataset = DRIVEDataset(split='train', transform=transform, image_size=None)
-        val_dataset = DRIVEDataset(split='val', transform=transform, image_size=None)
-        test_dataset = DRIVEDataset(split='test', transform=transform, image_size=None)
+        train_dataset = DRIVEDataset(split='train', transform=transform, image_size=None, augment=True)
+        val_dataset = DRIVEDataset(split='val', transform=transform, image_size=None, augment=False)
+        test_dataset = DRIVEDataset(split='test', transform=transform, image_size=None, augment=False)
     else:
         raise ValueError(f'Unknown dataset: {dataset_name}')
 
@@ -195,86 +194,3 @@ def init_datasets(dataset_name, img_size, batch_size):
         worker_init_fn=worker_init_fn
     )
     return train_loader, val_loader, test_loader
-
-
-def train_model(args):
-    train_loader, val_loader, test_loader = init_datasets(
-        dataset_name=args.dataset,
-        img_size=args.img_size,
-        batch_size=args.batch_size
-    )
-
-    pos_weight = None
-    if args.loss == 'weighted_bce' and args.pos_weight is None:
-        print('Estimating positive class weight from training data...')
-        pos_weight = estimate_pos_weight(train_loader)
-    elif args.loss == 'weighted_bce' and args.pos_weight is not None:
-        pos_weight = torch.tensor(args.pos_weight, device=device)
-
-    loss_fn = init_loss(args.loss, pos_weight=pos_weight)
-    model = init_model(args.model, base_channels=args.base_channels)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-
-    history = {
-        'train_loss': [],
-        'val_loss': [],
-        'train_dice': [],
-        'val_dice': [],
-    }
-
-    best_val_dice = -1.0
-    best_epoch = 0
-    best_state = None
-
-    for epoch in range(args.epochs):
-        print(f'Epoch [{epoch + 1}/{args.epochs}]')
-        train_loss, train_metrics = train_one_epoch(model, train_loader, optimizer, loss_fn, args.threshold)
-        val_loss, val_metrics = evaluate(model, val_loader, loss_fn, args.threshold)
-
-        history['train_loss'].append(train_loss)
-        history['val_loss'].append(val_loss)
-        history['train_dice'].append(train_metrics['dice'])
-        history['val_dice'].append(val_metrics['dice'])
-
-        print(f'Train Loss: {train_loss:.4f}, Dice: {train_metrics["dice"]:.4f}, IoU: {train_metrics["iou"]:.4f}')
-        print(f'Val   Loss: {val_loss:.4f}, Dice: {val_metrics["dice"]:.4f}, IoU: {val_metrics["iou"]:.4f}')
-
-        if val_metrics['dice'] > best_val_dice:
-            best_val_dice = val_metrics['dice']
-            best_epoch = epoch + 1
-            best_state = model.state_dict()
-            print(f'New best model (val dice: {best_val_dice:.4f}) at epoch {best_epoch}')
-
-    print(f'\nEvaluating best model from epoch {best_epoch}')
-    if best_state:
-        model.load_state_dict(best_state)
-
-    test_loss, test_metrics = evaluate(model, test_loader, loss_fn, args.threshold)
-    print(f'Test Loss: {test_loss:.4f}')
-    for key, value in test_metrics.items():
-        print(f'Test {key.capitalize()}: {value:.4f}')
-
-    history['test'] = test_metrics
-    history['best_epoch'] = best_epoch
-    return history
-
-
-def parse_args():
-    parser = argparse.ArgumentParser(description='Segmentation training script')
-    parser.add_argument('--dataset', default='ph2', choices=['ph2', 'drive'])
-    parser.add_argument('--model', default='cnn', choices=['cnn', 'unet'])
-    parser.add_argument('--loss', default='bce', choices=['bce', 'weighted_bce', 'focal'])
-    parser.add_argument('--epochs', type=int, default=40)
-    parser.add_argument('--batch-size', type=int, default=8)
-    parser.add_argument('--lr', type=float, default=1e-4)
-    parser.add_argument('--weight-decay', type=float, default=1e-5)
-    parser.add_argument('--img-size', type=int, default=256)
-    parser.add_argument('--base-channels', type=int, default=32)
-    parser.add_argument('--threshold', type=float, default=0.5)
-    parser.add_argument('--pos-weight', type=float, default=None)
-    return parser.parse_args()
-
-
-if __name__ == '__main__':
-    args = parse_args()
-    _ = train_model(args)
