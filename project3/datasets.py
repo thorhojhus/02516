@@ -12,6 +12,52 @@ from torchvision import transforms as T
 _PH2_SPLITS = None
 _DRIVE_SPLITS = None
 
+
+def simulate_clicks_from_mask(
+    full_mask_tensor, n_positive_clicks, n_negative_clicks
+):
+    # Ensure tensor is on CPU and in numpy format for sampling
+    mask_np = full_mask_tensor.squeeze().cpu().numpy().astype(np.uint8)
+    H, W = mask_np.shape
+
+    target_mask = np.zeros((H, W), dtype=np.float32)
+    weight_mask = np.zeros((H, W), dtype=np.float32)
+
+    positive_coords = np.argwhere(mask_np == 1)
+    negative_coords = np.argwhere(mask_np == 0)
+
+    # Positive Clicks
+    if len(positive_coords) > 0:
+        replace_pos = n_positive_clicks > len(positive_coords)
+        pos_indices = np.random.choice(
+            len(positive_coords), n_positive_clicks, replace=replace_pos
+        )
+        pos_clicks = positive_coords[pos_indices]
+        
+        for y, x in pos_clicks:
+            target_mask[y, x] = 1.0
+            weight_mask[y, x] = 1.0
+
+    # Negative Clicks
+    if len(negative_coords) > 0:
+        replace_neg = n_negative_clicks > len(negative_coords)
+        neg_indices = np.random.choice(
+            len(negative_coords), n_negative_clicks, replace=replace_neg
+        )
+        neg_clicks = negative_coords[neg_indices]
+        
+        for y, x in neg_clicks:
+            # target_mask[y, x] is already 0.0
+            weight_mask[y, x] = 1.0
+
+    # Convert to Tensors
+    target_mask_tensor = torch.from_numpy(target_mask).unsqueeze(0) # [1, H, W]
+    weight_mask_tensor = torch.from_numpy(weight_mask).unsqueeze(0) # [1, H, W]
+    
+    # Return stacked target and weight masks
+    return torch.cat([target_mask_tensor, weight_mask_tensor], dim=0)
+
+
 def _seeded_split(items, train_ratio=0.8, val_ratio=0.1):
     items = list(items)
     random.shuffle(items)
@@ -48,6 +94,9 @@ class PH2Dataset(torch.utils.data.Dataset):
         split='train',
         transform=None,
         image_size=(512, 512),
+        weak_supervision=False,
+        n_positive_clicks=5,
+        n_negative_clicks=5,
     ):
         assert split in ['train', 'val', 'test']
         global _PH2_SPLITS
@@ -61,6 +110,9 @@ class PH2Dataset(torch.utils.data.Dataset):
         self.transform = transform
         self.image_size = image_size
         self.samples = _PH2_SPLITS[split]
+        self.weak_supervision = weak_supervision
+        self.n_positive_clicks = n_positive_clicks
+        self.n_negative_clicks = n_negative_clicks
 
     def __len__(self):
         return len(self.samples)
@@ -91,7 +143,15 @@ class PH2Dataset(torch.utils.data.Dataset):
         else:
             image, mask = _default_transform(image, mask)
 
-        return image, mask, sample_id
+        if self.weak_supervision:
+            clicks_mask = simulate_clicks_from_mask(
+                mask,
+                self.n_positive_clicks,
+                self.n_negative_clicks
+            )
+            return image, clicks_mask, sample_id
+        else:
+            return image, mask, sample_id
 
 
 class DRIVEDataset(torch.utils.data.Dataset):
@@ -102,9 +162,15 @@ class DRIVEDataset(torch.utils.data.Dataset):
         transform=None,
         image_size=(512, 512),
         augment=False,
+        weak_supervision=False,
+        n_positive_clicks=5,
+        n_negative_clicks=5,
     ):
         assert split in ['train', 'val', 'test']
         self.augment = augment
+        self.weak_supervision = weak_supervision
+        self.n_positive_clicks = n_positive_clicks
+        self.n_negative_clicks = n_negative_clicks
         global _DRIVE_SPLITS
         training_dir = os.path.join(root_dir, 'training')
         image_paths = sorted(glob(os.path.join(training_dir, 'images', '*_training.tif')))
@@ -153,8 +219,16 @@ class DRIVEDataset(torch.utils.data.Dataset):
         if should_flip:
             image = F.hflip(image)
             mask = F.hflip(mask)
-
-        return image, mask, sample_id
+        
+        if self.weak_supervision:
+            clicks_mask = simulate_clicks_from_mask(
+                mask,
+                self.n_positive_clicks,
+                self.n_negative_clicks
+            )
+            return image, clicks_mask, sample_id
+        else:
+            return image, mask, sample_id
 
 
 def init_segmentation_transform(img_size):

@@ -21,9 +21,10 @@ set_seed(42)
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
-def get_experiment_name(model, dataset, loss):
+def get_experiment_name(model, dataset, loss, weak_supervision=False, n_clicks=5):
     """Generate consistent experiment name."""
-    return f"{model}_{dataset}_{loss}"
+    ws_suffix = f" (weak supervision w. {n_clicks} clicks)" if weak_supervision else ""
+    return f"{model}_{dataset}_{loss}{ws_suffix}"
 
 
 def run_single_experiment(config, results_dir, plots_dir):
@@ -41,8 +42,10 @@ def run_single_experiment(config, results_dir, plots_dir):
     model_name = config['model']
     dataset_name = config['dataset']
     loss_name = config['loss']
+    is_weak_supervision=config.get('weak_supervision', False)
+    n_clicks = config.get('n_clicks', 5)
 
-    exp_name = get_experiment_name(model_name, dataset_name, loss_name)
+    exp_name = get_experiment_name(model_name, dataset_name, loss_name, weak_supervision=is_weak_supervision, n_clicks=n_clicks)
     print(f"\n{'='*80}")
     print(f"Running Experiment: {exp_name}")
     print(f"{'='*80}\n")
@@ -66,8 +69,9 @@ def run_single_experiment(config, results_dir, plots_dir):
     train_loader, val_loader, test_loader = init_datasets(
         dataset_name=dataset_name,
         img_size=img_size,
-        batch_size=batch_size
-    )
+        batch_size=batch_size,
+        weak_supervision=is_weak_supervision,
+        n_clicks=n_clicks)
 
     print(f"Train samples: {len(train_loader.dataset)}")
     print(f"Val samples: {len(val_loader.dataset)}")
@@ -80,7 +84,13 @@ def run_single_experiment(config, results_dir, plots_dir):
         pos_weight = estimate_pos_weight(train_loader)
         print(f'Using auto-computed pos_weight: {pos_weight.item():.2f}')
 
-    loss_fn = init_loss(loss_name, pos_weight=pos_weight)
+    loss_fns = init_loss(loss_name, pos_weight=pos_weight, weak_supervision=is_weak_supervision)
+    if is_weak_supervision:
+        loss_fn, val_loss_fn = loss_fns
+    else:
+        loss_fn = loss_fns[0]
+        val_loss_fn = loss_fn
+        
 
     # Initialize model
     print(f"Initializing {model_name.upper()} model...")
@@ -104,6 +114,9 @@ def run_single_experiment(config, results_dir, plots_dir):
         'val_sensitivity': [],
         'train_specificity': [],
         'val_specificity': [],
+        'train_click_accuracy': [],
+        'train_click_sensitivity': [],
+        'train_click_specificity': []
     }
 
     best_val_dice = -1.0
@@ -117,24 +130,33 @@ def run_single_experiment(config, results_dir, plots_dir):
 
         # Train
         train_loss, train_metrics = train_one_epoch(
-            model, train_loader, optimizer, loss_fn, threshold
+            model, train_loader, optimizer, loss_fn, threshold, weak_supervision=is_weak_supervision
         )
 
         # Validate
         val_loss, val_metrics = evaluate(
-            model, val_loader, loss_fn, threshold
+            model, val_loader, val_loss_fn, threshold
         )
 
         # Record history
         history['train_loss'].append(train_loss)
         history['val_loss'].append(val_loss)
-        for metric in ['dice', 'iou', 'accuracy', 'sensitivity', 'specificity']:
-            history[f'train_{metric}'].append(train_metrics[metric])
-            history[f'val_{metric}'].append(val_metrics[metric])
+        if is_weak_supervision:
+            for metric in ['click_accuracy', 'click_sensitivity', 'click_specificity']:
+                history[f'train_{metric}'].append(train_metrics[metric])
+            for metric in ['dice', 'iou', 'accuracy', 'sensitivity', 'specificity']:
+                history[f'val_{metric}'].append(val_metrics[metric])
+        else:
+            for metric in ['dice', 'iou', 'accuracy', 'sensitivity', 'specificity']:
+                history[f'train_{metric}'].append(train_metrics[metric])
+                history[f'val_{metric}'].append(val_metrics[metric])
 
         # Print metrics
-        print(f'Train - Loss: {train_loss:.4f}, Dice: {train_metrics["dice"]:.4f}, '
-              f'IoU: {train_metrics["iou"]:.4f}, Acc: {train_metrics["accuracy"]:.4f}')
+        if is_weak_supervision:
+            print(f'Train - Loss: {train_loss:.4f}, Accuracy: {train_metrics["click_accuracy"]:.4f}') # IoU & Dice make no sense for clicks
+        else:
+            print(f'Train - Loss: {train_loss:.4f}, Dice: {train_metrics["dice"]:.4f}, '
+                  f'IoU: {train_metrics["iou"]:.4f}, Acc: {train_metrics["accuracy"]:.4f}')
         print(f'Val   - Loss: {val_loss:.4f}, Dice: {val_metrics["dice"]:.4f}, '
               f'IoU: {val_metrics["iou"]:.4f}, Acc: {val_metrics["accuracy"]:.4f}')
 
@@ -153,7 +175,7 @@ def run_single_experiment(config, results_dir, plots_dir):
     if best_state:
         model.load_state_dict(best_state)
 
-    test_loss, test_metrics = evaluate(model, test_loader, loss_fn, threshold)
+    test_loss, test_metrics = evaluate(model, test_loader, val_loss_fn, threshold)
 
     print(f'Test Results:')
     print(f'  Loss: {test_loss:.4f}')
@@ -193,7 +215,7 @@ def run_single_experiment(config, results_dir, plots_dir):
 
     # Generate individual training plot
     plot_path = plots_dir / f'{exp_name}_training.png'
-    plot_training_curves(history, str(plot_path), model_name=exp_name.replace('_', ' ').upper())
+    plot_training_curves(history, str(plot_path), model_name=exp_name.replace('_', ' ').upper(), weak_supervision=is_weak_supervision)
 
     return {
         'history': history,
@@ -212,7 +234,7 @@ def generate_comparison_plots(all_results, plots_dir):
     cnn_results = {
         res['exp_name']: res['history'] 
         for res in all_results 
-        if res['exp_name'].startswith('cnn_')
+        if 'cnn_' in res['exp_name']
     }
     if len(cnn_results) == 2:
         plot_metric_comparison(
@@ -226,7 +248,7 @@ def generate_comparison_plots(all_results, plots_dir):
     unet_bce_results = {
         res['exp_name']: res['history'] 
         for res in all_results 
-        if res['exp_name'].startswith('unet_') and res['exp_name'].endswith('_bce')
+        if res['exp_name'].startswith('unet_') and '_bce' in res['exp_name']
     }
     if len(unet_bce_results) == 2:
         plot_metric_comparison(
@@ -300,6 +322,10 @@ def main():
                        help='Batch size')
     parser.add_argument('--skip-existing', action='store_true',
                        help='Skip experiments that already have results')
+    parser.add_argument('--weak-supervision', action='store_true',
+                       help='Use weak supervision with simulated clicks')
+    parser.add_argument('--n-clicks', type=int, default=5,
+                       help='Number of positive/negative clicks for weak supervision')
     args = parser.parse_args()
 
     results_dir = Path(args.results_dir)
@@ -310,18 +336,28 @@ def main():
     # Define all experiments
     experiments = [
         # CNN baseline
-        {'model': 'cnn', 'dataset': 'ph2', 'loss': 'bce', 'epochs': args.epochs, 'batch_size': args.batch_size},
-        {'model': 'cnn', 'dataset': 'drive', 'loss': 'bce', 'epochs': args.epochs, 'batch_size': args.batch_size},
+        # {'model': 'cnn', 'dataset': 'ph2', 'loss': 'bce', 'epochs': args.epochs, 'batch_size': args.batch_size},
+        # {'model': 'cnn', 'dataset': 'drive', 'loss': 'bce', 'epochs': args.epochs, 'batch_size': args.batch_size},
 
         # UNet baseline
-        {'model': 'unet', 'dataset': 'ph2', 'loss': 'bce', 'epochs': args.epochs, 'batch_size': args.batch_size},
-        {'model': 'unet', 'dataset': 'drive', 'loss': 'bce', 'epochs': args.epochs, 'batch_size': args.batch_size},
+        # {'model': 'unet', 'dataset': 'ph2', 'loss': 'bce', 'epochs': args.epochs, 'batch_size': args.batch_size},
+        # {'model': 'unet', 'dataset': 'drive', 'loss': 'bce', 'epochs': args.epochs, 'batch_size': args.batch_size},
 
         # Ablation study
-        {'model': 'unet', 'dataset': 'ph2', 'loss': 'weighted_bce', 'epochs': args.epochs, 'batch_size': args.batch_size},
-        {'model': 'unet', 'dataset': 'drive', 'loss': 'weighted_bce', 'epochs': args.epochs, 'batch_size': args.batch_size},
-        {'model': 'unet', 'dataset': 'ph2', 'loss': 'focal', 'epochs': args.epochs, 'batch_size': args.batch_size},
-        {'model': 'unet', 'dataset': 'drive', 'loss': 'focal', 'epochs': args.epochs, 'batch_size': args.batch_size},
+        # {'model': 'unet', 'dataset': 'ph2', 'loss': 'weighted_bce', 'epochs': args.epochs, 'batch_size': args.batch_size},
+        # {'model': 'unet', 'dataset': 'drive', 'loss': 'weighted_bce', 'epochs': args.epochs, 'batch_size': args.batch_size},
+        # {'model': 'unet', 'dataset': 'ph2', 'loss': 'focal', 'epochs': args.epochs, 'batch_size': args.batch_size},
+        # {'model': 'unet', 'dataset': 'drive', 'loss': 'focal', 'epochs': args.epochs, 'batch_size': args.batch_size},
+        
+        # Weak supervision experiments
+        {'model': 'unet', 'dataset': 'ph2', 'loss': 'bce', 'epochs': args.epochs, 'batch_size': args.batch_size, 'weak_supervision': True, 'n_clicks': 5},
+        {'model': 'unet', 'dataset': 'drive', 'loss': 'bce', 'epochs': args.epochs, 'batch_size': args.batch_size, 'weak_supervision': True, 'n_clicks': 5},
+
+        {'model': 'unet', 'dataset': 'ph2', 'loss': 'bce', 'epochs': args.epochs, 'batch_size': args.batch_size, 'weak_supervision': True, 'n_clicks': 10},
+        {'model': 'unet', 'dataset': 'drive', 'loss': 'bce', 'epochs': args.epochs, 'batch_size': args.batch_size, 'weak_supervision': True, 'n_clicks': 10},
+
+        {'model': 'unet', 'dataset': 'ph2', 'loss': 'bce', 'epochs': args.epochs, 'batch_size': args.batch_size, 'weak_supervision': True, 'n_clicks': 20},
+        {'model': 'unet', 'dataset': 'drive', 'loss': 'bce', 'epochs': args.epochs, 'batch_size': args.batch_size, 'weak_supervision': True, 'n_clicks': 20},
     ]
 
     print(f"Total experiments: {len(experiments)}")
@@ -333,7 +369,7 @@ def main():
     all_results = []
 
     for i, config in enumerate(experiments, 1):
-        exp_name = get_experiment_name(config['model'], config['dataset'], config['loss'])
+        exp_name = get_experiment_name(config['model'], config['dataset'], config['loss'], config.get('weak_supervision', False))
 
         # Check if experiment already completed
         if args.skip_existing:

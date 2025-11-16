@@ -7,7 +7,7 @@ import json
 import pandas as pd
 
 
-def plot_training_curves(history, save_path, model_name='Model'):
+def plot_training_curves(history, save_path, model_name='Model', weak_supervision=False):
     """
     Plot training and validation curves for loss and dice metric.
     Inspired by project2 plotting style.
@@ -36,7 +36,8 @@ def plot_training_curves(history, save_path, model_name='Model'):
     ax1.grid(True, alpha=0.3)
     
     # Dice plot (primary segmentation metric)
-    ax2.plot(epochs, history['train_dice'], 'b-', label='Train', linewidth=2, marker='o', markersize=4)
+    if not weak_supervision:
+        ax2.plot(epochs, history['train_dice'], 'b-', label='Train', linewidth=2, marker='o', markersize=4)
     ax2.plot(epochs, history['val_dice'], 'r-', label='Validation', linewidth=2, marker='s', markersize=4)
     if 'test' in history and 'dice' in history['test']:
         ax2.axhline(y=history['test']['dice'], color='g', linestyle='--', linewidth=2, label='Test')

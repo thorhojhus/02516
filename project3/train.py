@@ -52,16 +52,59 @@ class FocalLoss(torch.nn.Module): # https://arxiv.org/pdf/1708.02002 #
         return loss.mean()
 
 
-def init_loss(loss_name, pos_weight=None):
+def init_loss(loss_name, pos_weight=None, weak_supervision=False):
     if loss_name == 'bce':
-        return torch.nn.BCEWithLogitsLoss()
+        if weak_supervision:
+            return (torch.nn.BCEWithLogitsLoss(reduction='none'), torch.nn.BCEWithLogitsLoss())
+        return (torch.nn.BCEWithLogitsLoss(), None)
+    
     if loss_name == 'weighted_bce':
         if pos_weight is None:
             raise ValueError('pos_weight must be provided for weighted_bce')
-        return torch.nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+        return (torch.nn.BCEWithLogitsLoss(pos_weight=pos_weight), None)
     if loss_name == 'focal':
-        return FocalLoss()
+        return (FocalLoss(), None)
     raise ValueError(f'Unknown loss: {loss_name}')
+
+
+def compute_training_click_metrics(logits, targets, threshold=0.5, eps=1e-6):
+    """
+    Computes metrics ONLY at the clicked pixels for a training batch.
+    'targets' is the [B, 2, H, W] tensor.
+    """
+    target_mask = targets[:, 0:1, :, :]
+    weight_mask = targets[:, 1:2, :, :]
+
+    # Get predictions
+    probs = torch.sigmoid(logits)
+    preds = (probs > threshold).float()
+
+    dims = tuple(range(1, targets.dim()))
+
+    # --- Calculate TP, TN at clicked pixels ---
+    tp = (preds * target_mask).sum(dim=dims)
+    tn = ((1 - preds) * (1 - target_mask) * weight_mask).sum(dim=dims)
+
+    #Calculate click-based metrics
+    total_clicks = weight_mask.sum(dim=dims)
+
+    # Accuracy
+    click_accuracy = (tp + tn + eps) / (total_clicks + eps)
+    
+    # Sensitivity
+    total_positive_clicks = target_mask.sum(dim=dims)
+    click_sensitivity = (tp + eps) / (total_positive_clicks + eps)
+
+    # Specificity
+    total_negative_clicks = total_clicks - total_positive_clicks
+    click_specificity = (tn + eps) / (total_negative_clicks + eps)
+
+    metrics = {
+        'click_accuracy': click_accuracy.mean().item(),
+        'click_sensitivity': click_sensitivity.mean().item(),
+        'click_specificity': click_specificity.mean().item()
+    }
+    return metrics
 
 
 def compute_metrics(logits, targets, threshold=0.5, eps=1e-6):
@@ -93,23 +136,41 @@ def compute_metrics(logits, targets, threshold=0.5, eps=1e-6):
     return metrics
 
 
-def train_one_epoch(model, dataloader, optimizer, loss_fn, threshold):
+def train_one_epoch(model, dataloader, optimizer, loss_fn, threshold, weak_supervision=False):
     model.train()
     total_loss = 0.0
-    agg = {k: 0.0 for k in ['dice', 'iou', 'accuracy', 'sensitivity', 'specificity']}
+
+    if weak_supervision:
+        agg = {k: 0.0 for k in ['click_accuracy', 'click_sensitivity', 'click_specificity']}
+    else:
+        agg = {k: 0.0 for k in ['dice', 'iou', 'accuracy', 'sensitivity', 'specificity']}      
 
     for images, masks, _ in tqdm(dataloader, desc='Train', leave=False):
         images = images.to(device)
-        masks = masks.to(device)
+        if weak_supervision:
+            # In weak supervision, masks are split into target and weight masks
+            target_mask_tensor = masks[:, 0:1, :, :].to(device)
+            weight_mask_tensor = masks[:, 1:2, :, :].to(device)
+        else:
+            masks = masks.to(device)
 
         optimizer.zero_grad()
         logits = model(images)
-        loss = loss_fn(logits, masks)
+        if weak_supervision:
+            pixel_wise_loss = loss_fn(logits, target_mask_tensor)
+            masked_loss = pixel_wise_loss * weight_mask_tensor
+            loss = masked_loss.sum() / weight_mask_tensor.sum()
+        else:
+            loss = loss_fn(logits, masks)
+
         loss.backward()
         optimizer.step()
 
         total_loss += loss.item()
-        batch_metrics = compute_metrics(logits.detach(), masks, threshold=threshold)
+        if weak_supervision:
+            batch_metrics = compute_training_click_metrics(logits.detach(), torch.cat([target_mask_tensor, weight_mask_tensor], dim=1), threshold=threshold)
+        else:
+            batch_metrics = compute_metrics(logits.detach(), masks, threshold=threshold)
         for key in agg:
             agg[key] += batch_metrics[key]
 
@@ -154,16 +215,16 @@ def estimate_pos_weight(dataloader):
     return torch.tensor(weight, device=device)
 
 
-def init_datasets(dataset_name, img_size, batch_size):
+def init_datasets(dataset_name, img_size, batch_size, weak_supervision=False, n_clicks=5):
     img_size = (img_size, img_size) if isinstance(img_size, int) else img_size
     if dataset_name == 'ph2':
         transform = init_segmentation_transform(img_size)
-        train_dataset = PH2Dataset(split='train', transform=transform, image_size=None)
+        train_dataset = PH2Dataset(split='train', transform=transform, image_size=None, weak_supervision=weak_supervision, n_positive_clicks=n_clicks, n_negative_clicks=n_clicks)
         val_dataset = PH2Dataset(split='val', transform=transform, image_size=None)
         test_dataset = PH2Dataset(split='test', transform=transform, image_size=None)
     elif dataset_name == 'drive':
         transform = init_segmentation_transform(img_size)
-        train_dataset = DRIVEDataset(split='train', transform=transform, image_size=None, augment=True)
+        train_dataset = DRIVEDataset(split='train', transform=transform, image_size=None, augment=True, weak_supervision=weak_supervision, n_positive_clicks=n_clicks, n_negative_clicks=n_clicks)
         val_dataset = DRIVEDataset(split='val', transform=transform, image_size=None, augment=False)
         test_dataset = DRIVEDataset(split='test', transform=transform, image_size=None, augment=False)
     else:
