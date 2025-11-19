@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "02516"
 version = "0.1.0"
@@ -13,8 +17,9 @@ dependencies = [
     "torchcodec>=0.8.0",
     "torchvision>=0.24.0",
     "tqdm>=4.67.1",
+    "opencv-contrib-python"
 ]
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["project2*", "project3*"]
+include = ["project2*", "project3*", "project4*"]
