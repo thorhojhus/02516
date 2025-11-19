@@ -2,7 +2,7 @@ import os
 import random
 import xml.etree.ElementTree as ET
 from glob import glob
-
+from .models import edge_boxes, selecting_search
 import numpy as np
 import torch
 from PIL import Image
@@ -13,8 +13,8 @@ def _default_transform(image):
     image = T.ToTensor()(image)
     return image
 
-
-class PotholeDataset(torch.utils.data.Dataset):
+# Should not really be a dataset, as it just pre-processes and saves. Will fix later
+class PotholeDatasetPreprocessor(torch.utils.data.Dataset):
     def __init__(
         self,
         root_dir='/dtu/datasets1/02516/potholes',
@@ -52,6 +52,9 @@ class PotholeDataset(torch.utils.data.Dataset):
         else:
             image = _default_transform(image)
 
+        # TODO: edge boxes or selective search
+        proposed_bounding_boxes = edge_boxes.run_edge_boxes(image_path, max_bounding_boxes=100)
+
         # Find all bounding boxes
         bounding_boxes = []
         for boxes in xml_root.iter('object'):
@@ -61,7 +64,10 @@ class PotholeDataset(torch.utils.data.Dataset):
             ymax = int(boxes.find('bndbox/ymax').text)
             bounding_boxes.append((xmin, ymin, xmax, ymax))
 
-        return image, bounding_boxes
+        # TODO: calculate IoU, if IoU > k, then pothole, otherwise background
+        # Then save to "processed_data" as JSON with image path and each of the now labeled proposed bounding boxes.
+
+        return image, bounding_boxes, proposed_bounding_boxes
 
 
 def init_segmentation_transform(img_size):
@@ -76,13 +82,13 @@ def init_segmentation_transform(img_size):
     return _apply
 
 if __name__ == '__main__':
-    dataset = PotholeDataset(
+    dataset = PotholeDatasetPreprocessor(
         root_dir='/dtu/datasets1/02516/potholes',
         split='train',
     )
     print(f'Dataset size: {len(dataset)}')
-    image, bounding_boxes = dataset[0]
-    print(f'Image shape: {image.shape}, Bounding boxes: {bounding_boxes}')
+    image, bounding_boxes, proposed_bounding_boxes = dataset[0]
+    print(f'Image shape: {image.shape}, Bounding boxes: {len(bounding_boxes)}, Proposed bounding boxes: {len(proposed_bounding_boxes)}')
 
     # plot the image, with the different bounding boxes, and save to a file test.png
     import matplotlib.pyplot as plt
@@ -100,4 +106,15 @@ if __name__ == '__main__':
             facecolor='none'
         )
         ax.add_patch(rect)
-    plt.savefig('test.png')
+    for box in proposed_bounding_boxes:
+        x, y, w, h = box
+        rect = patches.Rectangle(
+            (x, y),
+            w,
+            h,
+            linewidth=1,
+            edgecolor='b',
+            facecolor='none'
+        )
+        ax.add_patch(rect)
+    plt.savefig('project4/results/sample.png')
