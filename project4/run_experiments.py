@@ -15,11 +15,10 @@ from plotting import plot_training_curves, plot_metric_comparison, plot_test_met
 from utils import set_seed
 
 warnings.filterwarnings("ignore", category=UserWarning)
-torch.set_float32_matmul_precision('high')
+torch.set_float32_matmul_precision('high') # giga nerd thor stuff
 
 set_seed(42)
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
 
 def get_experiment_name(model, dataset, loss, weak_supervision=False, n_clicks=5):
     """Generate consistent experiment name."""
