@@ -50,7 +50,7 @@ class PotholeProposalDataset(Dataset):
             for box, label in entry["labeled_proposals"]:
                 # JSON may store tuples as lists; keep as list[float | int]
                 samples.append((image_path, box, int(label)))
-            if str(self.json_path).split("/")[-1].split(".")[0] != "test":
+            if str(self.json_path).split("/")[-1].split(".")[0] != "test_old":
                 for box, label in entry["ground_truths"]:
                     # convert box to [x, y, w, h]
                     x, y, xmax, ymax = box

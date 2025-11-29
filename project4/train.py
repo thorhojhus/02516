@@ -40,8 +40,6 @@ def train_one_epoch(model: nn.Module, dataloader: DataLoader, optimizer: torch.o
     total_loss = 0.0
     total_acc = 0.0
 
-    num_pos_class, num_neg_class = 0, 0
-
     for sliced_images, labels in tqdm(dataloader, desc='Train', leave=False):
         sliced_images = sliced_images.to(device)
         labels = labels.to(device)
@@ -54,9 +52,6 @@ def train_one_epoch(model: nn.Module, dataloader: DataLoader, optimizer: torch.o
         preds = torch.argmax(logits, dim=1)
         acc = (preds == labels).float().mean().item()
 
-        num_pos_class += (labels == 1).sum().item()
-        num_neg_class += (labels == 0).sum().item()
-
         loss.backward()
         optimizer.step()
 
@@ -64,8 +59,6 @@ def train_one_epoch(model: nn.Module, dataloader: DataLoader, optimizer: torch.o
         total_acc += acc
     avg_loss = total_loss / len(dataloader)
     avg_acc = total_acc / len(dataloader)
-
-    print(f"Pos class: {num_pos_class}, Neg class: {num_neg_class}; Ratio: {num_pos_class / (num_neg_class):.4f}")
 
     return avg_loss, avg_acc
 
@@ -132,13 +125,48 @@ def compute_ap(precisions, recalls):
     return ap / 11
 
 
-def MAP(model, iou_threshold=0.5, image_size=224):
+def nms(predictions, iou_threshold=0.5):
+    """
+    Apply Non-Maximum Suppression to filter overlapping detections.
+    
+    Args:
+        predictions: List of (confidence, box) where box is [xmin, ymin, xmax, ymax]
+        iou_threshold: IoU threshold for suppression
+    
+    Returns:
+        Filtered list of (confidence, box)
+    """
+    if len(predictions) == 0:
+        return []
+    
+    # Sort by confidence (descending)
+    predictions = sorted(predictions, key=lambda x: x[0], reverse=True)
+    
+    keep = []
+    while predictions:
+        # Take the highest confidence prediction
+        best = predictions.pop(0)
+        keep.append(best)
+        
+        # Filter out predictions with high IoU overlap
+        remaining = []
+        for pred in predictions:
+            iou = compute_iou(best[1], pred[1])
+            if iou < iou_threshold:
+                remaining.append(pred)
+        predictions = remaining
+    
+    return keep
+
+
+def MAP(model, iou_threshold=0.5, nms_threshold=0.5, image_size=224):
     """
     Compute Mean Average Precision for pothole detection.
     
     Args:
         model: The trained classifier model
         iou_threshold: IoU threshold for considering a detection as correct
+        nms_threshold: IoU threshold for Non-Maximum Suppression
         image_size: Size to resize proposal patches to
     
     Returns:
@@ -181,6 +209,9 @@ def MAP(model, iou_threshold=0.5, image_size=224):
                 
                 image_predictions.append((pothole_confidence, prop_box))
             
+            # Apply Non-Maximum Suppression
+            image_predictions = nms(image_predictions, iou_threshold=nms_threshold)
+            
             # Sort predictions by confidence (descending)
             image_predictions.sort(key=lambda x: x[0], reverse=True)
             
@@ -207,22 +238,23 @@ def MAP(model, iou_threshold=0.5, image_size=224):
                 
                 all_detections.append((confidence, is_tp, pred_box))
             
-            fig, ax = plt.subplots()
-            img_np = np.array(img)
-            ax.imshow(img_np)
-            for confidence, is_tp, pred_box in all_detections[:10]:
-                # add confidence as text label to the rectangle
-                print(confidence, end=", ")
-                xmin, ymin, xmax, ymax = pred_box
-                rect = plt.Rectangle((xmin, ymin), xmax - xmin, ymax - ymin, edgecolor='red' if is_tp else 'blue', facecolor='none', linewidth=1)
-                # ax.text(xmin, ymin, f"{confidence:.2f}", color='red', fontsize=8, verticalalignment='top')
-                ax.add_patch(rect)
-            for gt_box in gt_boxes:
-                xmin, ymin, xmax, ymax = gt_box
-                rect = plt.Rectangle((xmin, ymin), xmax - xmin, ymax - ymin, edgecolor='green', facecolor='none', linewidth=1)
-                ax.add_patch(rect)
-            plt.savefig("project4/results/detection_visualization.png")
-            break
+            # fig, ax = plt.subplots()
+            # img_np = np.array(img)
+            # ax.imshow(img_np)
+            # for confidence, is_tp, pred_box in all_detections:
+            #     # add confidence as text label to the rectangle
+            #     print(confidence, end=", ")
+            #     xmin, ymin, xmax, ymax = pred_box
+            #     rect = plt.Rectangle((xmin, ymin), xmax - xmin, ymax - ymin, edgecolor='red' if is_tp else 'blue', facecolor='none', linewidth=1)
+            #     if is_tp:
+            #         ax.text(xmin, ymin, f"{confidence:.2f}", color='red', fontsize=16, verticalalignment='top')
+            #     ax.add_patch(rect)
+            # for gt_box in gt_boxes:
+            #     xmin, ymin, xmax, ymax = gt_box
+            #     rect = plt.Rectangle((xmin, ymin), xmax - xmin, ymax - ymin, edgecolor='green', facecolor='none', linewidth=1)
+            #     ax.add_patch(rect)
+            # plt.savefig("project4/results/detection_visualization.png")
+            # break
     
     if total_gt == 0:
         print("No ground truth boxes found!")

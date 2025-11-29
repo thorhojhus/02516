@@ -22,22 +22,33 @@ class PotholeDatasetPreprocessor(torch.utils.data.Dataset):
         root_dir='/dtu/datasets1/02516/potholes',
         split='train',
         region_proposal_method='edge_boxes',
-        threshold=0.5,
+        threshold_pothole=0.5,
+        threshold_background=0.1,
     ):
         assert split in ['train', 'val', 'test']
         self.root_dir = root_dir
         self.root_dir_annotation = os.path.join(root_dir, 'annotations')
         self.split = split
-        self.samples = [name for name in sorted(os.listdir(self.root_dir_annotation))]
+        self.samples = sorted(os.listdir(self.root_dir_annotation))
+
+        random.seed(42) 
+        random.shuffle(self.samples)
+
+        total = len(self.samples)
+        train_end = int(0.8 * total)
+        val_end = int(0.9 * total)
+
         if split == 'train':
-            self.samples = self.samples[:int(0.8 * len(self.samples))]
+            self.samples = self.samples[:train_end]
         elif split == 'val':
-            self.samples = self.samples[int(0.8 * len(self.samples)):int(0.9 * len(self.samples))]
+            self.samples = self.samples[train_end:val_end]
         elif split == 'test':
-            self.samples = self.samples[int(0.9 * len(self.samples)):]
+            self.samples = self.samples[val_end:]
         else:
             raise ValueError(f'Unknown split: {split}')
-        self.threshold = threshold
+        
+        self.threshold_pothole = threshold_pothole
+        self.threshold_background = threshold_background
 
         if region_proposal_method == 'edge_boxes':
             self.region_proposer = edge_boxes.EdgeBoxesExtractor()
@@ -107,11 +118,13 @@ class PotholeDatasetPreprocessor(torch.utils.data.Dataset):
 
                 best_iou = max(best_iou, iou)
 
-            if best_iou >= self.threshold:
+            if best_iou >= self.threshold_pothole:
                 label = 1  # pothole
                 # print(f'Proposed box: {prop_box}, Label: {label}')
-            else:
+            elif best_iou <= self.threshold_background:
                 label = 0  # background
+            else:
+                continue  # ignore proposals with IoU in between
             labeled_proposals.append((prop_box.tolist(), label))
 
         return image, image_path, bounding_boxes, proposed_bounding_boxes, labeled_proposals
@@ -234,7 +247,6 @@ def openjson(file: str):
 
 
 if __name__ == '__main__':
-    #preprocess("train")
-    #openjson("project4/processed_data/train.json")
+    preprocess("train")
     preprocess("val")
     preprocess("test")
