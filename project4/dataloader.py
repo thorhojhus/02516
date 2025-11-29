@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Callable, List, Optional, Sequence, Tuple
 
 import torch
-from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
+from torch.utils.data import Dataset, DataLoader, SubsetRandomSampler
 from PIL import Image
 from torchvision import transforms as T
 
@@ -50,12 +50,13 @@ class PotholeProposalDataset(Dataset):
             for box, label in entry["labeled_proposals"]:
                 # JSON may store tuples as lists; keep as list[float | int]
                 samples.append((image_path, box, int(label)))
-            for box, label in entry["ground_truths"]:
-                # convert box to [x, y, w, h]
-                x, y, xmax, ymax = box
-                w = xmax - x
-                h = ymax - y
-                samples.append((image_path, [x, y, w, h], int(label)))
+            if str(self.json_path).split("/")[-1].split(".")[0] != "test":
+                for box, label in entry["ground_truths"]:
+                    # convert box to [x, y, w, h]
+                    x, y, xmax, ymax = box
+                    w = xmax - x
+                    h = ymax - y
+                    samples.append((image_path, [x, y, w, h], int(label)))
 
         self.samples = samples
 
@@ -90,34 +91,47 @@ class PotholeProposalDataset(Dataset):
         return patch_tensor, int(label)
 
 
-def _compute_class_weights(
+def _compute_undersampling_indices(
     labels: Sequence[int],
     target_pos_fraction: float = 0.33,
-) -> torch.DoubleTensor:
+    seed: Optional[int] = 42,
+) -> List[int]:
     """
-    Compute per-sample weights so that, under WeightedRandomSampler,
-    the effective sampling probability of positive (label==1) samples
-    is approximately `target_pos_fraction`.
+    Compute indices for undersampling the background class so that
+    the positive (label==1) samples make up approximately `target_pos_fraction`
+    of the resulting dataset.
+    
+    Returns a list of indices to keep (all positives + subsampled negatives).
     """
+    import random
+    if seed is not None:
+        random.seed(seed)
+    
     labels_tensor = torch.as_tensor(labels, dtype=torch.long)
-    n_pos = int((labels_tensor == 1).sum().item())
-    n_neg = int((labels_tensor == 0).sum().item())
-
-    if n_pos == 0 or n_neg == 0:
-        # Degenerate case: no positives or no negatives, fall back to uniform.
-        return torch.ones(len(labels_tensor), dtype=torch.double)
-
+    pos_indices = (labels_tensor == 1).nonzero(as_tuple=True)[0].tolist()
+    neg_indices = (labels_tensor == 0).nonzero(as_tuple=True)[0].tolist()
+    
+    n_pos = len(pos_indices)
+    n_neg = len(neg_indices)
+    
     r = float(target_pos_fraction)
     r = max(1e-3, min(1.0 - 1e-3, r))
-
-    # Solve for k = w_pos / w_neg:
-    #   (k * n_pos) / (k * n_pos + n_neg) = r
-    # => k = r * n_neg / ((1 - r) * n_pos)
-    k = r * n_neg / ((1.0 - r) * n_pos)
-
-    weights = torch.ones(len(labels_tensor), dtype=torch.double)
-    weights[labels_tensor == 1] = k
-    return weights
+    
+    # To achieve target_pos_fraction = n_pos / (n_pos + n_neg_keep):
+    # => n_neg_keep = n_pos * (1 - r) / r
+    n_neg_keep = int(n_pos * (1.0 - r) / r)
+    n_neg_keep = min(n_neg_keep, n_neg)  # Can't keep more than we have
+    
+    print(f"pos: {n_pos}, neg: {n_neg}, keeping {n_neg_keep} negatives (target_pos_fraction={r:.2f})")
+    
+    # Randomly select negatives to keep
+    neg_indices_keep = random.sample(neg_indices, n_neg_keep)
+    
+    # Combine all positives with subsampled negatives
+    all_indices = pos_indices + neg_indices_keep
+    random.shuffle(all_indices)
+    
+    return all_indices
 
 
 def make_pothole_proposal_loaders(
@@ -154,11 +168,11 @@ def make_pothole_proposal_loaders(
         image_size=image_size,
     )
 
-    # Build WeightedRandomSampler for train so that positives are at least ~33%.
+    # Undersample background class so that positives are at least ~33%.
     # samples are stored as (image_path, box, label)
     train_labels = [sample[2] for sample in train_dataset.samples]
-    weights = _compute_class_weights(train_labels, target_pos_fraction)
-    sampler = WeightedRandomSampler(weights, num_samples=len(train_labels), replacement=True)
+    undersample_indices = _compute_undersampling_indices(train_labels, target_pos_fraction)
+    sampler = SubsetRandomSampler(undersample_indices)
 
     train_loader = DataLoader(
         train_dataset,

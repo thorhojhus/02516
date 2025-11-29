@@ -1,257 +1,278 @@
 import warnings
 import argparse
+from PIL import Image
 from pathlib import Path
-
+import json
+from matplotlib import pyplot as plt
 import torch
+from torch import nn
 import torch.nn.functional as F
 import numpy as np
 from tqdm import tqdm
 from torch.utils.data import DataLoader
 
-from project4.preprocessor import PH2Dataset, DRIVEDataset, init_segmentation_transform
-from models.cnn import SegmentationCNN
-from models.unet import UNet
+from project4.dataloader import make_pothole_proposal_loaders
+from models.object_detector import CNN, PotholeResNet
 from utils import set_seed, set_default_dtype_based_on_arch
 set_seed(42)
 
 warnings.filterwarnings("ignore", category=UserWarning)
 torch.set_float32_matmul_precision('high')
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+loss_fn = torch.nn.CrossEntropyLoss()
 
 def worker_init_fn(worker_id):
     worker_seed = torch.initial_seed() % 2**32
     set_seed(worker_seed)
 
 
-def init_model(model_name, base_channels=32, num_classes=1):
+def init_model(model_name):
     if model_name == 'cnn':
-        return SegmentationCNN(num_classes=num_classes, base_channels=base_channels).to(device)
-    if model_name == 'unet':
-        return UNet(num_classes=num_classes, base_channels=base_channels).to(device)
+        return CNN().to(device)
+    if model_name == 'resnet':
+        return PotholeResNet().to(device)
     raise ValueError(f'Unknown model name: {model_name}')
 
 
-class FocalLoss(torch.nn.Module): # https://arxiv.org/pdf/1708.02002 # 
-    """
-    modified version of the standard cross-entropy loss function that is designed to address 
-    the problem of class imbalance by down-weighting the loss from easy-to-classify examples 
-    and increasing the importance of hard-to-classify ones
-    """
-    def __init__(self, alpha=0.25, gamma=2.0): # FROM PAPER: In general α should be decreased slightly as γ is increased (for γ = 2, α = 0.25 works best).
-        super().__init__()
-        self.alpha = alpha
-        self.gamma = gamma
-
-    def forward(self, logits, targets):
-        targets = targets.float()
-        bce = F.binary_cross_entropy_with_logits(logits, targets, reduction='none')
-        probs = torch.sigmoid(logits)
-        pt = torch.where(targets == 1, probs, 1 - probs)
-        loss = self.alpha * (1 - pt) ** self.gamma * bce
-        return loss.mean()
-
-
-def init_loss(loss_name, pos_weight=None, weak_supervision=False):
-    if loss_name == 'bce':
-        if weak_supervision:
-            return (torch.nn.BCEWithLogitsLoss(reduction='none'), torch.nn.BCEWithLogitsLoss())
-        return (torch.nn.BCEWithLogitsLoss(), None)
-    
-    if loss_name == 'weighted_bce':
-        if pos_weight is None:
-            raise ValueError('pos_weight must be provided for weighted_bce')
-        return (torch.nn.BCEWithLogitsLoss(pos_weight=pos_weight), None)
-    if loss_name == 'focal':
-        return (FocalLoss(), None)
-    raise ValueError(f'Unknown loss: {loss_name}')
-
-
-def compute_training_click_metrics(logits, targets, threshold=0.5, eps=1e-6):
-    """
-    Computes metrics ONLY at the clicked pixels for a training batch.
-    'targets' is the [B, 2, H, W] tensor.
-    """
-    target_mask = targets[:, 0:1, :, :]
-    weight_mask = targets[:, 1:2, :, :]
-
-    # Get predictions
-    probs = torch.sigmoid(logits)
-    preds = (probs > threshold).float()
-
-    dims = tuple(range(1, targets.dim()))
-
-    # --- Calculate TP, TN at clicked pixels ---
-    tp = (preds * target_mask).sum(dim=dims)
-    tn = ((1 - preds) * (1 - target_mask) * weight_mask).sum(dim=dims)
-
-    #Calculate click-based metrics
-    total_clicks = weight_mask.sum(dim=dims)
-
-    # Accuracy
-    click_accuracy = (tp + tn + eps) / (total_clicks + eps)
-    
-    # Sensitivity
-    total_positive_clicks = target_mask.sum(dim=dims)
-    click_sensitivity = (tp + eps) / (total_positive_clicks + eps)
-
-    # Specificity
-    total_negative_clicks = total_clicks - total_positive_clicks
-    click_specificity = (tn + eps) / (total_negative_clicks + eps)
-
-    metrics = {
-        'click_accuracy': click_accuracy.mean().item(),
-        'click_sensitivity': click_sensitivity.mean().item(),
-        'click_specificity': click_specificity.mean().item()
-    }
-    return metrics
-
-
-def compute_metrics(logits, targets, threshold=0.5, eps=1e-6):
-    probs = torch.sigmoid(logits)
-    preds = (probs > threshold).float()
-    targets = targets.float()
-
-    dims = tuple(range(1, targets.dim()))
-
-    tp = (preds * targets).sum(dim=dims)
-    fp = (preds * (1 - targets)).sum(dim=dims)
-    fn = ((1 - preds) * targets).sum(dim=dims)
-    tn = ((1 - preds) * (1 - targets)).sum(dim=dims)
-
-    dice = (2 * tp + eps) / (2 * tp + fp + fn + eps)
-    iou = (tp + eps) / (tp + fp + fn + eps)
-
-    accuracy = (preds == targets).float().mean(dim=dims)
-    sensitivity = (tp + eps) / (tp + fn + eps)
-    specificity = (tn + eps) / (tn + fp + eps)
-
-    metrics = {
-        'dice': dice.mean().item(),
-        'iou': iou.mean().item(),
-        'accuracy': accuracy.mean().item(),
-        'sensitivity': sensitivity.mean().item(),
-        'specificity': specificity.mean().item()
-    }
-    return metrics
-
-
-def train_one_epoch(model, dataloader, optimizer, loss_fn, threshold, weak_supervision=False):
+def train_one_epoch(model: nn.Module, dataloader: DataLoader, optimizer: torch.optim.Optimizer):
     model.train()
     total_loss = 0.0
+    total_acc = 0.0
 
-    if weak_supervision:
-        agg = {k: 0.0 for k in ['click_accuracy', 'click_sensitivity', 'click_specificity']}
-    else:
-        agg = {k: 0.0 for k in ['dice', 'iou', 'accuracy', 'sensitivity', 'specificity']}      
+    num_pos_class, num_neg_class = 0, 0
 
-    for images, masks, _ in tqdm(dataloader, desc='Train', leave=False):
-        images = images.to(device)
-        if weak_supervision:
-            # In weak supervision, masks are split into target and weight masks
-            target_mask_tensor = masks[:, 0:1, :, :].to(device)
-            weight_mask_tensor = masks[:, 1:2, :, :].to(device)
-        else:
-            masks = masks.to(device)
-
+    for sliced_images, labels in tqdm(dataloader, desc='Train', leave=False):
+        sliced_images = sliced_images.to(device)
+        labels = labels.to(device)
+        
         optimizer.zero_grad()
-        logits = model(images)
-        if weak_supervision:
-            pixel_wise_loss = loss_fn(logits, target_mask_tensor)
-            masked_loss = pixel_wise_loss * weight_mask_tensor
-            loss = masked_loss.sum() / weight_mask_tensor.sum()
-        else:
-            loss = loss_fn(logits, masks)
+        
+        logits = model(sliced_images)
+
+        loss = loss_fn(logits, labels)
+        preds = torch.argmax(logits, dim=1)
+        acc = (preds == labels).float().mean().item()
+
+        num_pos_class += (labels == 1).sum().item()
+        num_neg_class += (labels == 0).sum().item()
 
         loss.backward()
         optimizer.step()
 
         total_loss += loss.item()
-        if weak_supervision:
-            batch_metrics = compute_training_click_metrics(logits.detach(), torch.cat([target_mask_tensor, weight_mask_tensor], dim=1), threshold=threshold)
-        else:
-            batch_metrics = compute_metrics(logits.detach(), masks, threshold=threshold)
-        for key in agg:
-            agg[key] += batch_metrics[key]
-
+        total_acc += acc
     avg_loss = total_loss / len(dataloader)
-    avg_metrics = {k: agg[k] / len(dataloader) for k in agg}
-    return avg_loss, avg_metrics
+    avg_acc = total_acc / len(dataloader)
+
+    print(f"Pos class: {num_pos_class}, Neg class: {num_neg_class}; Ratio: {num_pos_class / (num_neg_class):.4f}")
+
+    return avg_loss, avg_acc
 
 
-def evaluate(model, dataloader, loss_fn, threshold):
+def evaluate(model, dataloader):
     model.eval()
     total_loss = 0.0
-    agg = {k: 0.0 for k in ['dice', 'iou', 'accuracy', 'sensitivity', 'specificity']}
+    total_acc = 0.0
     with torch.inference_mode():
-        for images, masks, _ in dataloader:
+        for images, labels in dataloader:
             images = images.to(device)
-            masks = masks.to(device)
+            labels = labels.to(device)
 
             logits = model(images)
-            loss = loss_fn(logits, masks)
+            loss = loss_fn(logits, labels)
             total_loss += loss.item()
-
-            batch_metrics = compute_metrics(logits, masks, threshold=threshold)
-            for key in agg:
-                agg[key] += batch_metrics[key]
+            preds = torch.argmax(logits, dim=1)
+            total_acc += (preds == labels).float().mean().item()
 
     avg_loss = total_loss / len(dataloader)
-    avg_metrics = {k: agg[k] / len(dataloader) for k in agg}
-    return avg_loss, avg_metrics
+    avg_acc = total_acc / len(dataloader)
+    return avg_loss, avg_acc
 
 
-def estimate_pos_weight(dataloader):
-    total_pos = 0.0
-    total_neg = 0.0
-    for images, masks, _ in dataloader:
-        _ = images  # unused, keeps style consistent
-        pos = masks.sum().item()
-        total_pos += pos
-        total_neg += masks.numel() - pos
-    if total_pos == 0:
-        return torch.tensor(1.0, device=device)
-    weight = total_neg / (total_pos + 1e-6)
-    return torch.tensor(weight, device=device)
+def load_ground_truths(split: str) -> list[tuple[str, list, list]]:
+    with open(f"project4/processed_data/{split}.json", "r") as f:
+        data = json.load(f)
+    return [(item["image_path"], item["ground_truths"], item["labeled_proposals"]) for item in data]
 
 
-def init_datasets(dataset_name, img_size, batch_size, weak_supervision=False, n_clicks=5):
-    img_size = (img_size, img_size) if isinstance(img_size, int) else img_size
-    if dataset_name == 'ph2':
-        transform = init_segmentation_transform(img_size)
-        train_dataset = PH2Dataset(split='train', transform=transform, image_size=None, weak_supervision=weak_supervision, n_positive_clicks=n_clicks, n_negative_clicks=n_clicks)
-        val_dataset = PH2Dataset(split='val', transform=transform, image_size=None)
-        test_dataset = PH2Dataset(split='test', transform=transform, image_size=None)
-    elif dataset_name == 'drive':
-        transform = init_segmentation_transform(img_size)
-        train_dataset = DRIVEDataset(split='train', transform=transform, image_size=None, augment=True, weak_supervision=weak_supervision, n_positive_clicks=n_clicks, n_negative_clicks=n_clicks)
-        val_dataset = DRIVEDataset(split='val', transform=transform, image_size=None, augment=False)
-        test_dataset = DRIVEDataset(split='test', transform=transform, image_size=None, augment=False)
-    else:
-        raise ValueError(f'Unknown dataset: {dataset_name}')
+def compute_iou(box1, box2):
+    """
+    Compute IoU between two boxes.
+    box1: [xmin, ymin, xmax, ymax]
+    box2: [xmin, ymin, xmax, ymax]
+    """
+    x1 = max(box1[0], box2[0])
+    y1 = max(box1[1], box2[1])
+    x2 = min(box1[2], box2[2])
+    y2 = min(box1[3], box2[3])
+    
+    inter_area = max(0, x2 - x1) * max(0, y2 - y1)
+    
+    box1_area = (box1[2] - box1[0]) * (box1[3] - box1[1])
+    box2_area = (box2[2] - box2[0]) * (box2[3] - box2[1])
+    
+    union_area = box1_area + box2_area - inter_area
+    
+    if union_area == 0:
+        return 0.0
+    
+    return inter_area / union_area
 
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
+
+def compute_ap(precisions, recalls):
+    """
+    Compute Average Precision using 11-point interpolation.
+    """
+    ap = 0.0
+    for t in np.linspace(0, 1, 11):
+        precisions_above_recall = [p for p, r in zip(precisions, recalls) if r >= t]
+        if precisions_above_recall:
+            ap += max(precisions_above_recall)
+    return ap / 11
+
+
+def MAP(model, iou_threshold=0.5, image_size=224):
+    """
+    Compute Mean Average Precision for pothole detection.
+    
+    Args:
+        model: The trained classifier model
+        iou_threshold: IoU threshold for considering a detection as correct
+        image_size: Size to resize proposal patches to
+    
+    Returns:
+        mAP: Mean Average Precision score
+    """
+    model.eval()
+    
+    all_detections = []  # List of (confidence, is_tp)
+    total_gt = 0  # Total number of ground truth boxes
+    
+    with torch.inference_mode():
+        for _, (image_path, ground_truths, labeled_proposals) in enumerate(tqdm(load_ground_truths("val"), desc="Computing mAP")):
+            img = Image.open(image_path).convert("RGB")
+            
+            # Extract ground truth boxes (format: [[xmin, ymin, xmax, ymax], label])
+            gt_boxes = [gt[0] for gt in ground_truths if gt[1] == 1]
+            gt_matched = [False] * len(gt_boxes)
+            total_gt += len(gt_boxes)
+            
+            # Get predictions for all proposals
+            image_predictions = []
+            
+            for proposal, _ in labeled_proposals:
+                x, y, w, h = map(int, proposal)
+                # Convert to [xmin, ymin, xmax, ymax] format
+                prop_box = [x, y, x + w, y + h]
+                
+                # Extract and preprocess patch
+                patch = img.crop((x, y, x + w, y + h))
+                patch = patch.resize((image_size, image_size), resample=Image.BICUBIC)
+                patch_tensor = torch.tensor(np.array(patch)).permute(2, 0, 1).unsqueeze(0).float() / 255.0
+                patch_tensor = patch_tensor.to(device)
+                
+                # Get model prediction
+                logits = model(patch_tensor)
+                probs = F.softmax(logits, dim=1)
+                
+                # Get confidence for pothole class (class 1)
+                pothole_confidence = probs[0, 1].item()
+                
+                image_predictions.append((pothole_confidence, prop_box))
+            
+            # Sort predictions by confidence (descending)
+            image_predictions.sort(key=lambda x: x[0], reverse=True)
+            
+            # Match predictions to ground truths
+            for confidence, pred_box in image_predictions:
+                best_iou = 0.0
+                best_gt_idx = -1
+                
+                for gt_idx, gt_box in enumerate(gt_boxes):
+                    if gt_matched[gt_idx]:
+                        continue
+                    
+                    iou = compute_iou(pred_box, gt_box)
+                    if iou > best_iou:
+                        best_iou = iou
+                        best_gt_idx = gt_idx
+                
+                # Determine if this is a true positive
+                if best_iou >= iou_threshold and best_gt_idx >= 0:
+                    is_tp = True
+                    gt_matched[best_gt_idx] = True
+                else:
+                    is_tp = False
+                
+                all_detections.append((confidence, is_tp, pred_box))
+            
+            fig, ax = plt.subplots()
+            img_np = np.array(img)
+            ax.imshow(img_np)
+            for confidence, is_tp, pred_box in all_detections[:10]:
+                # add confidence as text label to the rectangle
+                print(confidence, end=", ")
+                xmin, ymin, xmax, ymax = pred_box
+                rect = plt.Rectangle((xmin, ymin), xmax - xmin, ymax - ymin, edgecolor='red' if is_tp else 'blue', facecolor='none', linewidth=1)
+                # ax.text(xmin, ymin, f"{confidence:.2f}", color='red', fontsize=8, verticalalignment='top')
+                ax.add_patch(rect)
+            for gt_box in gt_boxes:
+                xmin, ymin, xmax, ymax = gt_box
+                rect = plt.Rectangle((xmin, ymin), xmax - xmin, ymax - ymin, edgecolor='green', facecolor='none', linewidth=1)
+                ax.add_patch(rect)
+            plt.savefig("project4/results/detection_visualization.png")
+            break
+    
+    if total_gt == 0:
+        print("No ground truth boxes found!")
+        return 0.0
+    
+    # Sort all detections by confidence
+    all_detections.sort(key=lambda x: x[0], reverse=True)
+    
+    # Compute precision and recall at each detection
+    tp_cumsum = 0
+    fp_cumsum = 0
+    precisions = []
+    recalls = []
+    
+    for confidence, is_tp, _ in all_detections:
+        if is_tp:
+            tp_cumsum += 1
+        else:
+            fp_cumsum += 1
+        
+        precision = tp_cumsum / (tp_cumsum + fp_cumsum)
+        recall = tp_cumsum / total_gt
+        
+        precisions.append(precision)
+        recalls.append(recall)
+    
+    # Compute AP using 11-point interpolation
+    ap = compute_ap(precisions, recalls)
+    
+    print(f"mAP@{iou_threshold}: {ap:.4f}")
+    print(f"Total GT boxes: {total_gt}, Total detections: {len(all_detections)}")
+    print(f"True Positives: {tp_cumsum}, False Positives: {fp_cumsum}")
+    
+    return ap
+
+if __name__ == "__main__":
+    model = init_model('resnet')
+    
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    train_loader, val_loader, test_loader = make_pothole_proposal_loaders(
+        processed_dir="project4/processed_data",
+        batch_size=32,
         num_workers=4,
-        pin_memory=True,
-        worker_init_fn=worker_init_fn
+        image_size=224,
+        target_pos_fraction=0.33,
     )
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=4,
-        pin_memory=True,
-        worker_init_fn=worker_init_fn
-    )
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=4,
-        pin_memory=True,
-        worker_init_fn=worker_init_fn
-    )
-    return train_loader, val_loader, test_loader
+    num_epochs = 3
+    for epoch in range(num_epochs):
+        train_loss, train_acc = train_one_epoch(model, train_loader, optimizer)
+        val_loss, val_acc = evaluate(model, val_loader)
+        print(f"Epoch {epoch+1}/{num_epochs}, Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
+    
+    MAP(model=model)
