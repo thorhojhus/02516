@@ -523,7 +523,7 @@ if __name__== "__main__":
         target_pos_fraction=0.30,
     )
     
-    num_epochs = 2
+    num_epochs = 10
     best_val_acc = 0.0
     best_model_path = "project4/checkpoints/best_model.pth"
     
