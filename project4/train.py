@@ -512,7 +512,7 @@ if __name__== "__main__":
     valset = "val_selective_search_v2.json"
     testset = "test_selective_search_v2.json"
     
-    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)
     train_loader, val_loader = make_pothole_proposal_loaders(
         processed_dir="project4/processed_data",
         trainset=trainset,
