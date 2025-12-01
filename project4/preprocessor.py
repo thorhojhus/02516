@@ -21,7 +21,7 @@ class PotholeDatasetPreprocessor(torch.utils.data.Dataset):
         self,
         root_dir='/dtu/datasets1/02516/potholes',
         split='train',
-        region_proposal_method='edge_boxes',
+        region_proposal_method='selective_search',
         threshold_pothole=0.5,
         threshold_background=0.1,
     ):
@@ -74,11 +74,19 @@ class PotholeDatasetPreprocessor(torch.utils.data.Dataset):
             "images",
             image_path,
         )
-        image = Image.open(image_path).convert('RGB')
+        # Load image as PIL
+        pil_image = Image.open(image_path).convert('RGB')
 
-        proposed_bounding_boxes = self.region_proposer.get_regions(np.array(image))
+        # Convert PIL -> numpy RGB
+        img_rgb = np.array(pil_image)
 
-        image = _default_transform(image)
+        # Convert RGB -> BGR
+        img_bgr = img_rgb[:, :, ::-1].copy()
+
+        # Pass correct format to SS
+        proposed_bounding_boxes = self.region_proposer.get_regions(img_bgr)
+
+        image = _default_transform(pil_image)
 
         # Find all bounding boxes
         bounding_boxes = []
@@ -148,36 +156,15 @@ def sample_usage():
         if label == 1: # pothole
             #print(f'Proposed box: {box}, Label: {label}')
             x, y, w, h = box
-            rect = patches.Rectangle(
-                (x, y),
-                w,
-                h,
-                linewidth=2,
-                edgecolor='g',
-                facecolor='none'
-            )
+            rect = patches.Rectangle((x, y), w, h, linewidth=2, edgecolor='g', facecolor='none')
             ax.add_patch(rect)
         else:
             x, y, w, h = box
-            rect = patches.Rectangle(
-                (x, y),
-                w,
-                h,
-                linewidth=0.5,
-                edgecolor='b',
-                facecolor='none'
-            )
+            rect = patches.Rectangle((x, y), w, h, linewidth=0.5, edgecolor='b', facecolor='none')
             ax.add_patch(rect)
     for box in bounding_boxes:
         xmin, ymin, xmax, ymax = box
-        rect = patches.Rectangle(
-            (xmin, ymin),
-            xmax - xmin,
-            ymax - ymin,
-            linewidth=2,
-            edgecolor='r',
-            facecolor='none'
-        )
+        rect = patches.Rectangle((xmin, ymin), xmax - xmin, ymax - ymin, linewidth=2, edgecolor='r', facecolor='none')
         ax.add_patch(rect)
     plt.savefig('project4/results/sample_pothole.png')
 
@@ -228,7 +215,7 @@ def preprocess(split: typing.Literal["train", "val", "test"] = "train"):
         })
     # save the file in processed_{split}.json
     import json
-    with open(f'project4/processed_data/{split}.json', 'w') as f:
+    with open(f'project4/processed_data/{split}_selective_search_v2.json', 'w') as f:
         json.dump(json_data, f)
     
 

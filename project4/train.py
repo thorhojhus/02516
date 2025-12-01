@@ -10,9 +10,10 @@ import torch.nn.functional as F
 import numpy as np
 from tqdm import tqdm
 from torch.utils.data import DataLoader
+from torchvision import transforms as T
 
-from project4.dataloader import make_pothole_proposal_loaders
-from models.object_detector import CNN, PotholeResNet
+from dataloader import make_pothole_proposal_loaders
+from models.object_detector import CNN, PotholeResNet, PotholeResNet50
 from utils import set_seed, set_default_dtype_based_on_arch
 set_seed(42)
 
@@ -21,6 +22,8 @@ torch.set_float32_matmul_precision('high')
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 loss_fn = torch.nn.CrossEntropyLoss()
+
+print(f'Using device: {device}')
 
 def worker_init_fn(worker_id):
     worker_seed = torch.initial_seed() % 2**32
@@ -32,6 +35,8 @@ def init_model(model_name):
         return CNN().to(device)
     if model_name == 'resnet':
         return PotholeResNet().to(device)
+    if model_name == 'resnet50':
+        return PotholeResNet50().to(device)
     raise ValueError(f'Unknown model name: {model_name}')
 
 
@@ -176,9 +181,10 @@ def MAP(model, iou_threshold=0.5, nms_threshold=0.5, image_size=224):
     
     all_detections = []  # List of (confidence, is_tp)
     total_gt = 0  # Total number of ground truth boxes
+    transform = T.ToTensor()
     
     with torch.inference_mode():
-        for _, (image_path, ground_truths, labeled_proposals) in enumerate(tqdm(load_ground_truths("val"), desc="Computing mAP")):
+        for image_path, ground_truths, labeled_proposals in tqdm(load_ground_truths("test_selective_search_v2"), desc="Computing mAP"):
             img = Image.open(image_path).convert("RGB")
             
             # Extract ground truth boxes (format: [[xmin, ymin, xmax, ymax], label])
@@ -197,7 +203,7 @@ def MAP(model, iou_threshold=0.5, nms_threshold=0.5, image_size=224):
                 # Extract and preprocess patch
                 patch = img.crop((x, y, x + w, y + h))
                 patch = patch.resize((image_size, image_size), resample=Image.BICUBIC)
-                patch_tensor = torch.tensor(np.array(patch)).permute(2, 0, 1).unsqueeze(0).float() / 255.0
+                patch_tensor = transform(patch).unsqueeze(0)
                 patch_tensor = patch_tensor.to(device)
                 
                 # Get model prediction
@@ -237,24 +243,6 @@ def MAP(model, iou_threshold=0.5, nms_threshold=0.5, image_size=224):
                     is_tp = False
                 
                 all_detections.append((confidence, is_tp, pred_box))
-            
-            # fig, ax = plt.subplots()
-            # img_np = np.array(img)
-            # ax.imshow(img_np)
-            # for confidence, is_tp, pred_box in all_detections:
-            #     # add confidence as text label to the rectangle
-            #     print(confidence, end=", ")
-            #     xmin, ymin, xmax, ymax = pred_box
-            #     rect = plt.Rectangle((xmin, ymin), xmax - xmin, ymax - ymin, edgecolor='red' if is_tp else 'blue', facecolor='none', linewidth=1)
-            #     if is_tp:
-            #         ax.text(xmin, ymin, f"{confidence:.2f}", color='red', fontsize=16, verticalalignment='top')
-            #     ax.add_patch(rect)
-            # for gt_box in gt_boxes:
-            #     xmin, ymin, xmax, ymax = gt_box
-            #     rect = plt.Rectangle((xmin, ymin), xmax - xmin, ymax - ymin, edgecolor='green', facecolor='none', linewidth=1)
-            #     ax.add_patch(rect)
-            # plt.savefig("project4/results/detection_visualization.png")
-            # break
     
     if total_gt == 0:
         print("No ground truth boxes found!")
@@ -290,21 +278,248 @@ def MAP(model, iou_threshold=0.5, nms_threshold=0.5, image_size=224):
     
     return ap
 
-if __name__ == "__main__":
-    model = init_model('resnet')
+
+def MaxMAP(model, iou_threshold=0.5):
+    """
+    Compute theoretical maximum MAP by treating all proposals as detections
+    regardless of classifier confidence. This gives the upper bound based on
+    proposal quality alone.
     
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
-    train_loader, val_loader, test_loader = make_pothole_proposal_loaders(
+    Args:
+        model: Not used, kept for consistency
+        iou_threshold: IoU threshold for considering a detection as correct
+    
+    Returns:
+        max_mAP: Theoretical maximum mAP achievable with current proposals
+    """
+    all_detections = []  # List of (dummy_confidence, is_tp, pred_box)
+    total_gt = 0
+    
+    for image_path, ground_truths, labeled_proposals in tqdm(load_ground_truths("test_selective_search_v2"), desc="Computing Max mAP"):
+        img = Image.open(image_path).convert("RGB")
+        
+        # Extract ground truth boxes
+        gt_boxes = [gt[0] for gt in ground_truths if gt[1] == 1]
+        gt_matched = [False] * len(gt_boxes)
+        total_gt += len(gt_boxes)
+        
+        # Process all proposals
+        for proposal, _ in labeled_proposals:
+            x, y, w, h = map(int, proposal)
+            prop_box = [x, y, x + w, y + h]
+            
+            # Find best matching GT box
+            best_iou = 0.0
+            best_gt_idx = -1
+            
+            for gt_idx, gt_box in enumerate(gt_boxes):
+                if gt_matched[gt_idx]:
+                    continue
+                
+                iou = compute_iou(prop_box, gt_box)
+                if iou > best_iou:
+                    best_iou = iou
+                    best_gt_idx = gt_idx
+            
+            # Determine if this is a true positive
+            if best_iou >= iou_threshold and best_gt_idx >= 0:
+                is_tp = True
+                gt_matched[best_gt_idx] = True
+            else:
+                is_tp = False
+            
+            # Use IoU as confidence (higher IoU = higher confidence)
+            all_detections.append((best_iou, is_tp, prop_box))
+    
+    if total_gt == 0:
+        print("No ground truth boxes found!")
+        return 0.0
+    
+    # Sort by "confidence" (IoU with best matching GT)
+    all_detections.sort(key=lambda x: x[0], reverse=True)
+    
+    # Compute precision and recall
+    tp_cumsum = 0
+    fp_cumsum = 0
+    precisions = []
+    recalls = []
+    
+    for confidence, is_tp, _ in all_detections:
+        if is_tp:
+            tp_cumsum += 1
+        else:
+            fp_cumsum += 1
+        
+        precision = tp_cumsum / (tp_cumsum + fp_cumsum)
+        recall = tp_cumsum / total_gt
+        
+        precisions.append(precision)
+        recalls.append(recall)
+    
+    # Compute AP using 11-point interpolation
+    max_ap = compute_ap(precisions, recalls)
+    
+    print(f"\nTheoretical Max mAP@{iou_threshold}: {max_ap:.4f}")
+    print(f"Total GT boxes: {total_gt}, Total proposals: {len(all_detections)}")
+    print(f"Max possible True Positives: {tp_cumsum}, False Positives: {fp_cumsum}")
+    print(f"Recall upper bound: {tp_cumsum/total_gt:.4f}")
+    
+    return max_ap
+
+
+def visualize_first_test_image(model, iou_threshold=0.5, nms_threshold=0.5, image_size=224, output_path="project4/results/detection_visualization.png"):
+    """
+    Visualize detections on the first test image with NMS applied.
+    Green: Ground truth boxes
+    Red: Best matching predictions (IoU >= threshold)
+    Blue: Predictions with confidence > 0.5
+    Orange: Predictions with confidence <= 0.5
+    """
+    model.eval()
+    transform = T.ToTensor()
+    
+    with torch.inference_mode():
+        # Get first test image
+        test_data = load_ground_truths("test")
+        if not test_data:
+            print("No test data found!")
+            return
+            
+        image_path, ground_truths, labeled_proposals = test_data[0]
+        img = Image.open(image_path).convert("RGB")
+        
+        # Extract ground truth boxes
+        gt_boxes = [gt[0] for gt in ground_truths if gt[1] == 1]
+        
+        # Get predictions for all proposals
+        all_predictions = []
+        
+        for proposal, _ in labeled_proposals:
+            x, y, w, h = map(int, proposal)
+            prop_box = [x, y, x + w, y + h]
+            
+            # Extract and preprocess patch
+            patch = img.crop((x, y, x + w, y + h))
+            patch = patch.resize((image_size, image_size), resample=Image.BICUBIC)
+            patch_tensor = transform(patch).unsqueeze(0)
+            patch_tensor = patch_tensor.to(device)
+            
+            # Get model prediction
+            logits = model(patch_tensor)
+            probs = F.softmax(logits, dim=1)
+            pothole_confidence = probs[0, 1].item()
+            
+            all_predictions.append((pothole_confidence, prop_box))
+        
+        # Apply Non-Maximum Suppression
+        all_predictions = nms(all_predictions, iou_threshold=nms_threshold)
+        
+        # Find best matches for each GT box
+        best_matches = []
+        for gt_box in gt_boxes:
+            best_iou = 0.0
+            best_pred = None
+            
+            for confidence, pred_box in all_predictions:
+                iou = compute_iou(pred_box, gt_box)
+                if iou > best_iou:
+                    best_iou = iou
+                    best_pred = (confidence, pred_box)
+            
+            if best_iou >= iou_threshold and best_pred:
+                best_matches.append(best_pred)
+        
+        # Create visualization
+        fig, ax = plt.subplots(figsize=(12, 8))
+        img_np = np.array(img)
+        ax.imshow(img_np)
+        
+        # Draw ground truth boxes (green)
+        for gt_box in gt_boxes:
+            xmin, ymin, xmax, ymax = gt_box
+            rect = plt.Rectangle((xmin, ymin), xmax - xmin, ymax - ymin, 
+                                edgecolor='green', facecolor='none', linewidth=2)
+            ax.add_patch(rect)
+        
+        # Draw predictions
+        best_match_boxes = [box for _, box in best_matches]
+        
+        for confidence, pred_box in all_predictions:
+            xmin, ymin, xmax, ymax = pred_box
+            
+            # Determine color based on matching and confidence
+            if pred_box in best_match_boxes:
+                color = 'red'
+                label = 'Best Match'
+                linewidth = 2
+                show_text = True
+            elif confidence > 0.5:
+                color = 'blue'
+                label = 'Pred > 0.5'
+                linewidth = 1.5
+                show_text = True
+            else:
+                color = 'orange'
+                label = 'Pred ≤ 0.5'
+                linewidth = 1
+                show_text = False
+            
+            rect = plt.Rectangle((xmin, ymin), xmax - xmin, ymax - ymin, 
+                                edgecolor=color, facecolor='none', linewidth=linewidth)
+            ax.add_patch(rect)
+            
+            # Add confidence text only for red and blue boxes
+            if show_text:
+                ax.text(xmin, ymin - 5, f"{confidence:.2f}", 
+                       color=color, fontsize=8, verticalalignment='bottom',
+                       bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.7))
+        
+        # Create legend
+        from matplotlib.patches import Patch
+        legend_elements = [
+            Patch(facecolor='none', edgecolor='green', linewidth=2, label='Ground Truth'),
+            Patch(facecolor='none', edgecolor='red', linewidth=2, label='Best Match'),
+            Patch(facecolor='none', edgecolor='blue', linewidth=1.5, label='Pred > 0.5'),
+            Patch(facecolor='none', edgecolor='orange', linewidth=1, label='Pred ≤ 0.5')
+        ]
+        ax.legend(handles=legend_elements, loc='upper right')
+        
+        ax.axis('off')
+        plt.tight_layout()
+        
+        # Create directory if it doesn't exist
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        print(f"\nVisualization saved to {output_path}")
+        print(f"Total GT boxes: {len(gt_boxes)}")
+        print(f"Proposals before NMS: {len(labeled_proposals)}")
+        print(f"Proposals after NMS: {len(all_predictions)}")
+        print(f"Best matches: {len(best_matches)}")
+        print(f"Predictions > 0.5: {sum(1 for c, _ in all_predictions if c > 0.5)}")
+        print(f"Predictions ≤ 0.5: {sum(1 for c, _ in all_predictions if c <= 0.5)}")
+
+if __name__ == "__main__":
+    model = init_model('resnet50')
+    
+    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)
+    train_loader, val_loader = make_pothole_proposal_loaders(
         processed_dir="project4/processed_data",
-        batch_size=32,
+        batch_size=64,
         num_workers=4,
         image_size=224,
-        target_pos_fraction=0.33,
+        target_pos_fraction=0.30,
     )
-    num_epochs = 3
+    num_epochs = 8
     for epoch in range(num_epochs):
         train_loss, train_acc = train_one_epoch(model, train_loader, optimizer)
         val_loss, val_acc = evaluate(model, val_loader)
         print(f"Epoch {epoch+1}/{num_epochs}, Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
     
+    # Visualize first test image with NMS
+    visualize_first_test_image(model, iou_threshold=0.5, nms_threshold=0.5)
+    
     MAP(model=model)
+    
+    MaxMAP(model=model)

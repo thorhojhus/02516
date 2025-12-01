@@ -72,6 +72,24 @@ class PotholeResNet(nn.Module):
         x = self.base_model(x)
         return x # logits
 
+class PotholeResNet50(nn.Module):
+    def __init__(self):
+        super(PotholeResNet50, self).__init__()
+        # Use ResNet50 with ImageNet pretrained weights
+        self.base_model = models.resnet50(weights=models.ResNet50_Weights.DEFAULT)
+
+        # Freeze all existing backbone parameters
+        for param in self.base_model.parameters():
+            param.requires_grad = False
+
+        # Replace the final fully connected layer with a 2 class output
+        in_features = self.base_model.fc.in_features
+        self.base_model.fc = nn.Linear(in_features, 2)  # background and potholes
+
+    def forward(self, x):
+        x = self.base_model(x)
+        return x  # logits
+
 if __name__ == "__main__":
     model = PotholeResNet()
     sample_input = torch.randn(4, 3, 224, 224)  # batch of 4 RGB images of size 224x224

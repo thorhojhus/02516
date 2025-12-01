@@ -50,13 +50,12 @@ class PotholeProposalDataset(Dataset):
             for box, label in entry["labeled_proposals"]:
                 # JSON may store tuples as lists; keep as list[float | int]
                 samples.append((image_path, box, int(label)))
-            if str(self.json_path).split("/")[-1].split(".")[0] != "test_old":
-                for box, label in entry["ground_truths"]:
-                    # convert box to [x, y, w, h]
-                    x, y, xmax, ymax = box
-                    w = xmax - x
-                    h = ymax - y
-                    samples.append((image_path, [x, y, w, h], int(label)))
+            for box, label in entry["ground_truths"]:
+                # convert box to [x, y, w, h]
+                x, y, xmax, ymax = box
+                w = xmax - x
+                h = ymax - y
+                samples.append((image_path, [x, y, w, h], int(label)))
 
         self.samples = samples
 
@@ -153,17 +152,12 @@ def make_pothole_proposal_loaders(
     processed_dir = Path(processed_dir)
 
     train_dataset = PotholeProposalDataset(
-        processed_dir / "train.json",
+        processed_dir / "train_selective_search_v2.json",
         transform=transform,
         image_size=image_size,
     )
     val_dataset = PotholeProposalDataset(
-        processed_dir / "val.json",
-        transform=transform,
-        image_size=image_size,
-    )
-    test_dataset = PotholeProposalDataset(
-        processed_dir / "test.json",
+        processed_dir / "val_selective_search_v2.json",
         transform=transform,
         image_size=image_size,
     )
@@ -188,20 +182,13 @@ def make_pothole_proposal_loaders(
         num_workers=num_workers,
         pin_memory=True,
     )
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=True,
-    )
 
-    return train_loader, val_loader, test_loader
+    return train_loader, val_loader
 
 
 if __name__ == "__main__":
     import matplotlib.pyplot as plt
-    train_loader, val_loader, test_loader = make_pothole_proposal_loaders(
+    train_loader, val_loader = make_pothole_proposal_loaders(
         processed_dir="project4/processed_data",
         batch_size=32,
         num_workers=4,
