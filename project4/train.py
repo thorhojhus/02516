@@ -89,7 +89,7 @@ def evaluate(model, dataloader):
 
 
 def load_ground_truths(split: str) -> list[tuple[str, list, list]]:
-    with open(f"project4/processed_data/{split}.json", "r") as f:
+    with open(f"project4/processed_data/{split}", "r") as f:
         data = json.load(f)
     return [(item["image_path"], item["ground_truths"], item["labeled_proposals"]) for item in data]
 
@@ -164,7 +164,7 @@ def nms(predictions, iou_threshold=0.5):
     return keep
 
 
-def MAP(model, iou_threshold=0.5, nms_threshold=0.5, image_size=224):
+def MAP(model, iou_threshold=0.5, nms_threshold=0.5, image_size=224, testset="test_selective_search_v2.json"):
     """
     Compute Mean Average Precision for pothole detection.
     
@@ -184,7 +184,7 @@ def MAP(model, iou_threshold=0.5, nms_threshold=0.5, image_size=224):
     transform = T.ToTensor()
     
     with torch.inference_mode():
-        for image_path, ground_truths, labeled_proposals in tqdm(load_ground_truths("test_selective_search_v2"), desc="Computing mAP"):
+        for image_path, ground_truths, labeled_proposals in tqdm(load_ground_truths(testset), desc="Computing mAP"):
             img = Image.open(image_path).convert("RGB")
             
             # Extract ground truth boxes (format: [[xmin, ymin, xmax, ymax], label])
@@ -279,7 +279,9 @@ def MAP(model, iou_threshold=0.5, nms_threshold=0.5, image_size=224):
     return ap
 
 
-def MaxMAP(model, iou_threshold=0.5):
+
+# Dont use for report
+def MaxMAP(model, iou_threshold=0.5, testset="test_selective_search_v2.json"):
     """
     Compute theoretical maximum MAP by treating all proposals as detections
     regardless of classifier confidence. This gives the upper bound based on
@@ -295,7 +297,7 @@ def MaxMAP(model, iou_threshold=0.5):
     all_detections = []  # List of (dummy_confidence, is_tp, pred_box)
     total_gt = 0
     
-    for image_path, ground_truths, labeled_proposals in tqdm(load_ground_truths("test_selective_search_v2"), desc="Computing Max mAP"):
+    for image_path, ground_truths, labeled_proposals in tqdm(load_ground_truths(testset), desc="Computing Max mAP"):
         img = Image.open(image_path).convert("RGB")
         
         # Extract ground truth boxes
@@ -367,7 +369,7 @@ def MaxMAP(model, iou_threshold=0.5):
     return max_ap
 
 
-def visualize_first_test_image(model, iou_threshold=0.5, nms_threshold=0.5, image_size=224, output_path="project4/results/detection_visualization.png"):
+def visualize_first_test_image(model, iou_threshold=0.5, nms_threshold=0.5, image_size=224, testset="test_selective_search_v2.json", output_path="project4/results/detection_visualization.png"):
     """
     Visualize detections on the first test image with NMS applied.
     Green: Ground truth boxes
@@ -380,7 +382,7 @@ def visualize_first_test_image(model, iou_threshold=0.5, nms_threshold=0.5, imag
     
     with torch.inference_mode():
         # Get first test image
-        test_data = load_ground_truths("test")
+        test_data = load_ground_truths(testset)
         if not test_data:
             print("No test data found!")
             return
@@ -500,26 +502,60 @@ def visualize_first_test_image(model, iou_threshold=0.5, nms_threshold=0.5, imag
         print(f"Predictions > 0.5: {sum(1 for c, _ in all_predictions if c > 0.5)}")
         print(f"Predictions ≤ 0.5: {sum(1 for c, _ in all_predictions if c <= 0.5)}")
 
-if __name__ == "__main__":
-    model = init_model('resnet50')
+
+
+
+if __name__== "__main__":
+    model = init_model('resnet')
     
-    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)
+    trainset = "train_selective_search_v2.json"
+    valset = "val_selective_search_v2.json"
+    testset = "test_selective_search_v2.json"
+    
+    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
     train_loader, val_loader = make_pothole_proposal_loaders(
         processed_dir="project4/processed_data",
+        trainset=trainset,
+        valset=valset,
         batch_size=64,
         num_workers=4,
         image_size=224,
         target_pos_fraction=0.30,
     )
-    num_epochs = 8
+    
+    num_epochs = 2
+    best_val_acc = 0.0
+    best_model_path = "project4/checkpoints/best_model.pth"
+    
+    # Create checkpoint directory if it doesn't exist
+    Path(best_model_path).parent.mkdir(parents=True, exist_ok=True)
+    
     for epoch in range(num_epochs):
         train_loss, train_acc = train_one_epoch(model, train_loader, optimizer)
         val_loss, val_acc = evaluate(model, val_loader)
         print(f"Epoch {epoch+1}/{num_epochs}, Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
+        
+        # Save best model
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'val_acc': val_acc,
+                'val_loss': val_loss,
+            }, best_model_path)
+            print(f"Saved best model with validation accuracy: {val_acc:.4f}")
+    
+    # Load best model for evaluation
+    print(f"\nLoading best model (val_acc: {best_val_acc:.4f})...")
+    checkpoint = torch.load(best_model_path)
+    model.load_state_dict(checkpoint['model_state_dict'])
     
     # Visualize first test image with NMS
-    visualize_first_test_image(model, iou_threshold=0.5, nms_threshold=0.5)
+    visualize_first_test_image(model, iou_threshold=0.5, nms_threshold=0.5, testset=valset)
     
-    MAP(model=model)
+    MAP(model=model, iou_threshold=0.5, nms_threshold=0.5, testset=testset)
     
-    MaxMAP(model=model)
+    # Dont use for report
+    # MaxMAP(model=model, testset=testset)

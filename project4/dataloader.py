@@ -135,6 +135,8 @@ def _compute_undersampling_indices(
 
 def make_pothole_proposal_loaders(
     processed_dir: str | Path = "project4/processed_data",
+    trainset: str = "train_selective_search_v2.json",
+    valset: str = "val_selective_search_v2.json",
     batch_size: int = 32,
     num_workers: int = 4,
     image_size: int = 64,
@@ -152,12 +154,12 @@ def make_pothole_proposal_loaders(
     processed_dir = Path(processed_dir)
 
     train_dataset = PotholeProposalDataset(
-        processed_dir / "train_selective_search_v2.json",
+        processed_dir / trainset,
         transform=transform,
         image_size=image_size,
     )
     val_dataset = PotholeProposalDataset(
-        processed_dir / "val_selective_search_v2.json",
+        processed_dir / valset,
         transform=transform,
         image_size=image_size,
     )
@@ -190,6 +192,8 @@ if __name__ == "__main__":
     import matplotlib.pyplot as plt
     train_loader, val_loader = make_pothole_proposal_loaders(
         processed_dir="project4/processed_data",
+        trainset="train_selective_search_v2.json",
+        valset="val_selective_search_v2.json",
         batch_size=32,
         num_workers=4,
         image_size=224,
