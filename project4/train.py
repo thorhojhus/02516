@@ -120,14 +120,26 @@ def compute_iou(box1, box2):
 
 def compute_ap(precisions, recalls):
     """
-    Compute Average Precision using 11-point interpolation.
+    Compute Average Precision using the Area Under Curve (AUC) method.
+    This is the standard VOC 2010+ / COCO method.
     """
-    ap = 0.0
-    for t in np.linspace(0, 1, 11):
-        precisions_above_recall = [p for p, r in zip(precisions, recalls) if r >= t]
-        if precisions_above_recall:
-            ap += max(precisions_above_recall)
-    return ap / 11
+    # Convert to numpy arrays if they aren't already
+    recalls = np.array(recalls)
+    precisions = np.array(precisions)
+    
+    # Append sentinel values to beginning and end
+    mrec = np.concatenate(([0.], recalls, [1.]))
+    mpre = np.concatenate(([0.], precisions, [0.]))
+
+    # Compute the precision envelope
+    for i in range(mpre.size - 1, 0, -1):
+        mpre[i - 1] = np.maximum(mpre[i - 1], mpre[i])
+
+    # Calculate area under PR curve
+    i = np.where(mrec[1:] != mrec[:-1])[0]
+    ap = np.sum((mrec[i + 1] - mrec[i]) * mpre[i + 1])
+    
+    return ap
 
 
 def nms(predictions, iou_threshold=0.5):
@@ -166,7 +178,7 @@ def nms(predictions, iou_threshold=0.5):
 
 def MAP(model, iou_threshold=0.5, nms_threshold=0.5, image_size=224, testset="test_selective_search_v2.json"):
     """
-    Compute Mean Average Precision for pothole detection.
+    Compute Average Precision for pothole detection.
     
     Args:
         model: The trained classifier model
@@ -175,7 +187,7 @@ def MAP(model, iou_threshold=0.5, nms_threshold=0.5, image_size=224, testset="te
         image_size: Size to resize proposal patches to
     
     Returns:
-        mAP: Mean Average Precision score
+        ap: Average Precision score
     """
     model.eval()
     
@@ -184,7 +196,7 @@ def MAP(model, iou_threshold=0.5, nms_threshold=0.5, image_size=224, testset="te
     transform = T.ToTensor()
     
     with torch.inference_mode():
-        for image_path, ground_truths, labeled_proposals in tqdm(load_ground_truths(testset), desc="Computing mAP"):
+        for image_path, ground_truths, labeled_proposals in tqdm(load_ground_truths(testset), desc="Computing AP"):
             img = Image.open(image_path).convert("RGB")
             
             # Extract ground truth boxes (format: [[xmin, ymin, xmax, ymax], label])
@@ -269,10 +281,10 @@ def MAP(model, iou_threshold=0.5, nms_threshold=0.5, image_size=224, testset="te
         precisions.append(precision)
         recalls.append(recall)
     
-    # Compute AP using 11-point interpolation
+    # Compute AP using Area Under Curve
     ap = compute_ap(precisions, recalls)
     
-    print(f"mAP@{iou_threshold}: {ap:.4f}")
+    print(f"AP@{iou_threshold}: {ap:.4f}")
     print(f"Total GT boxes: {total_gt}, Total detections: {len(all_detections)}")
     print(f"True Positives: {tp_cumsum}, False Positives: {fp_cumsum}")
     
@@ -283,7 +295,7 @@ def MAP(model, iou_threshold=0.5, nms_threshold=0.5, image_size=224, testset="te
 # Dont use for report
 def MaxMAP(model, iou_threshold=0.5, testset="test_selective_search_v2.json"):
     """
-    Compute theoretical maximum MAP by treating all proposals as detections
+    Compute theoretical maximum AP by treating all proposals as detections
     regardless of classifier confidence. This gives the upper bound based on
     proposal quality alone.
     
@@ -292,12 +304,12 @@ def MaxMAP(model, iou_threshold=0.5, testset="test_selective_search_v2.json"):
         iou_threshold: IoU threshold for considering a detection as correct
     
     Returns:
-        max_mAP: Theoretical maximum mAP achievable with current proposals
+        max_ap: Theoretical maximum AP achievable with current proposals
     """
     all_detections = []  # List of (dummy_confidence, is_tp, pred_box)
     total_gt = 0
     
-    for image_path, ground_truths, labeled_proposals in tqdm(load_ground_truths(testset), desc="Computing Max mAP"):
+    for image_path, ground_truths, labeled_proposals in tqdm(load_ground_truths(testset), desc="Computing Max AP"):
         img = Image.open(image_path).convert("RGB")
         
         # Extract ground truth boxes
@@ -358,10 +370,10 @@ def MaxMAP(model, iou_threshold=0.5, testset="test_selective_search_v2.json"):
         precisions.append(precision)
         recalls.append(recall)
     
-    # Compute AP using 11-point interpolation
+    # Compute AP using Area Under Curve
     max_ap = compute_ap(precisions, recalls)
     
-    print(f"\nTheoretical Max mAP@{iou_threshold}: {max_ap:.4f}")
+    print(f"\nTheoretical Max AP@{iou_threshold}: {max_ap:.4f}")
     print(f"Total GT boxes: {total_gt}, Total proposals: {len(all_detections)}")
     print(f"Max possible True Positives: {tp_cumsum}, False Positives: {fp_cumsum}")
     print(f"Recall upper bound: {tp_cumsum/total_gt:.4f}")

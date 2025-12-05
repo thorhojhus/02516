@@ -123,12 +123,27 @@ def nms(predictions, iou_threshold=0.5):
 
 
 def compute_ap(precisions, recalls):
-    ap = 0.0
-    for t in np.linspace(0, 1, 11):
-        precisions_above = [p for p, r in zip(precisions, recalls) if r >= t]
-        if precisions_above:
-            ap += max(precisions_above)
-    return ap / 11
+    """
+    Compute Average Precision using the Area Under Curve (AUC) method.
+    This is the standard VOC 2010+ / COCO method.
+    """
+    # Convert to numpy arrays if they aren't already
+    recalls = np.array(recalls)
+    precisions = np.array(precisions)
+    
+    # Append sentinel values to beginning and end
+    mrec = np.concatenate(([0.], recalls, [1.]))
+    mpre = np.concatenate(([0.], precisions, [0.]))
+
+    # Compute the precision envelope
+    for i in range(mpre.size - 1, 0, -1):
+        mpre[i - 1] = np.maximum(mpre[i - 1], mpre[i])
+
+    # Calculate area under PR curve
+    i = np.where(mrec[1:] != mrec[:-1])[0]
+    ap = np.sum((mrec[i + 1] - mrec[i]) * mpre[i + 1])
+    
+    return ap
 
 
 def compute_map(model, iou_threshold=0.5, nms_threshold=0.5, image_size=224,
@@ -139,7 +154,7 @@ def compute_map(model, iou_threshold=0.5, nms_threshold=0.5, image_size=224,
     transform = T.ToTensor()
 
     with torch.inference_mode():
-        for image_path, ground_truths, labeled_proposals in tqdm(load_ground_truths(testset), desc="Computing mAP"):
+        for image_path, ground_truths, labeled_proposals in tqdm(load_ground_truths(testset), desc="Computing AP"):
             img = Image.open(image_path).convert("RGB")
             gt_boxes = [gt[0] for gt in ground_truths if gt[1] == 1]
             gt_matched = [False] * len(gt_boxes)
@@ -312,7 +327,7 @@ def main():
         image_size=image_size, testset="test_selective_search_v2.json"
     )
 
-    print(f"\nmAP@0.5: {ap:.4f}")
+    print(f"\nAP@0.5: {ap:.4f}")
     print(f"Total GT boxes: {total_gt}")
     print(f"True Positives: {total_tp}")
     print(f"False Positives: {total_fp}")
@@ -392,7 +407,7 @@ F1 Score & {f1:.4f} \\\\
 \\toprule
 Metric & Value \\\\
 \\midrule
-mAP@0.5 & {ap:.4f} \\\\
+AP@0.5 & {ap:.4f} \\\\
 Total Ground Truth Boxes & {total_gt} \\\\
 True Positives & {total_tp} \\\\
 False Positives & {total_fp} \\\\
@@ -438,7 +453,7 @@ Detection Recall & {total_tp/total_gt:.4f} \\\\
     print("SUMMARY")
     print("="*60)
     print(f"Best Validation Accuracy: {best_val_acc:.4f} (Epoch {best_epoch})")
-    print(f"Test mAP@0.5: {ap:.4f}")
+    print(f"Test AP@0.5: {ap:.4f}")
 
 
 if __name__ == "__main__":
